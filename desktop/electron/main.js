@@ -189,7 +189,31 @@ function createWindow(targetUrl) {
 
   // Show only once the first paint is ready: a white flash over a dark UI is
   // the kind of detail that makes an app feel unpolished.
-  mainWindow.once("ready-to-show", () => mainWindow?.show());
+  //
+  // A window restored from a previous session can also come back off-screen (a
+  // monitor was removed, or the saved position is stale). Those coordinates read
+  // as "the window opened but there is nothing to see", so the bounds are pulled
+  // back onto the nearest display before it is shown.
+  mainWindow.once("ready-to-show", () => {
+    if (!mainWindow) return;
+    const b = mainWindow.getBounds();
+    const { screen } = require("electron");
+    const onScreen = screen.getAllDisplays().some((display) => {
+      const w = display.workArea;
+      return (
+        b.x + b.width > w.x &&
+        b.x < w.x + w.width &&
+        b.y + b.height > w.y &&
+        b.y < w.y + w.height
+      );
+    });
+    if (!onScreen) {
+      log.log(`window bounds ${JSON.stringify(b)} were off every display - centring`);
+      mainWindow.center();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+  });
 
   // Keep the window inside our own origin. External links open in the user's
   // real browser instead of navigating the shell away from the app.
@@ -323,10 +347,21 @@ function registerIpc() {
 }
 
 app.on("second-instance", () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  }
+  if (!mainWindow) return;
+  // Clicking the shortcut while the app is already running gets here. Restoring is
+  // not enough on Windows: a background process is normally refused the
+  // foreground, so the window came back *behind* whatever was on screen and the
+  // launch looked like it did nothing at all. Showing, restoring and momentarily
+  // forcing top-most is the reliable way to bring it to the front.
+  log.log("second-instance: bringing the existing window forward");
+  if (!mainWindow.isVisible()) mainWindow.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.setAlwaysOnTop(true);
+  mainWindow.focus();
+  mainWindow.moveTop();
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setAlwaysOnTop(false);
+  }, 600);
 });
 
 // A second copy must not keep running: it would open its own server on another
