@@ -1,0 +1,1493 @@
+"""Tests for chat routes: messages, send, edit, delete, react, search, etc."""
+
+import io
+import json
+import sqlite3
+import time
+
+import minimost.auth as auth_mod
+import minimost.chat as chat_mod
+import minimost.common as common_mod
+import minimost.presence as presence_mod
+from werkzeug.security import generate_password_hash
+
+
+def _add_user(username, password="Password1!"):
+    db = sqlite3.connect(auth_mod.AUTH_DB)
+    db.execute(
+        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+        (username, generate_password_hash(password)),
+    )
+    db.commit()
+    db.close()
+    common_mod.init_user_db(username)
+
+
+def _insert_message(username, channel="general", content="hello", ts=None, sender=None):
+    ts = ts or time.time()
+    sender = sender or username
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        (channel, sender, content, ts),
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT id FROM messages WHERE ts=? AND channel=?", (ts, channel)
+    ).fetchone()
+    db.close()
+    return row[0], ts
+
+
+# ── GET / (index) ─────────────────────────────────────────────────────────────
+
+
+def test_index_unauthenticated(client):
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/login" in resp.location
+
+
+def test_index_authenticated(alice):
+    resp = alice.get("/")
+    assert resp.status_code == 200
+
+
+# ── GET /channels ─────────────────────────────────────────────────────────────
+
+
+def test_channels_unauthenticated(client):
+    resp = client.get("/channels")
+    assert resp.status_code == 302
+
+
+def test_channels_returns_list(alice):
+    resp = alice.get("/channels")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert isinstance(data, list)
+    assert "general" in data
+
+
+# ── GET /channel_unreads ──────────────────────────────────────────────────────
+
+
+def test_channel_unreads_empty(alice):
+    resp = alice.get("/channel_unreads")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "general" in data
+    assert data["general"] == 0
+
+
+def test_channel_unreads_counts(alice_and_bob, app):
+    _add_user("charlie")
+    ts = time.time()
+    alice_db = sqlite3.connect(str(common_mod.shared_db_path()))
+    alice_db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        (
+            "general",
+            "bob",
+            "hi",
+            ts,
+        ),
+    )
+    alice_db.commit()
+    alice_db.close()
+    resp = alice_and_bob.get("/channel_unreads")
+    data = resp.get_json()
+    assert data["general"] == 1
+
+
+# ── GET /unread_count ─────────────────────────────────────────────────────────
+
+
+def test_unread_count_zero(alice):
+    resp = alice.get("/unread_count")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["count"] == 0
+
+
+def test_unread_count_with_dm(alice):
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        ("dm:alice:bob", "bob", "hey", time.time()),
+    )
+    db.commit()
+    db.close()
+    resp = alice.get("/unread_count")
+    data = resp.get_json()
+    assert data["count"] == 1
+
+
+# ── GET /dms ──────────────────────────────────────────────────────────────────
+
+
+def test_dms_empty(alice):
+    resp = alice.get("/dms")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
+def test_dms_returns_conversations(alice):
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        ("dm:alice:bob", "bob", "hi", time.time()),
+    )
+    db.commit()
+    db.close()
+    data = alice.get("/dms").get_json()
+    assert len(data) == 1
+    assert data[0]["channel"] == "dm:alice:bob"
+    assert "bob" in data[0]["users"]
+
+
+def _client_for(app, username):
+    """Register *username* and return a client authenticated as them."""
+    _add_user(username)
+    c = app.test_client()
+    with c.session_transaction() as sess:
+        sess["user"] = username
+    return c
+
+
+def _seed_dm(channel, sender, content="secret"):
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        (channel, sender, content, time.time()),
+    )
+    db.commit()
+    db.close()
+
+
+# Usernames may contain "_", which SQL LIKE treats as a single-character
+# wildcard. Without escaping, "a_ice" matches the channel "dm:alice:bob" and
+# the DM-membership checks hand over conversations the user is not part of.
+
+
+def test_dms_underscore_username_does_not_match_other_users(app, isolated_dbs):
+    _add_user("alice")
+    _seed_dm("dm:alice:bob", "bob")
+    attacker = _client_for(app, "a_ice")
+
+    assert attacker.get("/dms").get_json() == []
+
+
+def test_unread_count_underscore_username_does_not_match_other_users(app, isolated_dbs):
+    _add_user("alice")
+    _seed_dm("dm:alice:bob", "bob")
+    attacker = _client_for(app, "a_ice")
+
+    assert attacker.get("/unread_count").get_json()["count"] == 0
+
+
+def test_search_underscore_username_does_not_leak_dm_contents(app, isolated_dbs):
+    _add_user("alice")
+    _seed_dm("dm:alice:bob", "bob", content="find me please")
+    attacker = _client_for(app, "a_ice")
+
+    results = attacker.get("/search_messages?q=find me").get_json()
+    assert [r for r in results if r["channel"].startswith("dm:")] == []
+
+
+def test_dms_underscore_username_still_matches_own_conversations(app, isolated_dbs):
+    """The escaping must not break a genuine underscore in a username."""
+    _add_user("bob")
+    _seed_dm("dm:a_ice:bob", "bob")
+    owner = _client_for(app, "a_ice")
+
+    data = owner.get("/dms").get_json()
+    assert [d["channel"] for d in data] == ["dm:a_ice:bob"]
+
+
+# ── GET /online_users ─────────────────────────────────────────────────────────
+
+
+def test_online_users_empty(alice):
+    resp = alice.get("/online_users")
+    assert resp.status_code == 200
+    assert resp.get_json() == {}
+
+
+def test_online_users_shows_recent(alice):
+    pdb = sqlite3.connect(presence_mod.PRESENCE_DB)
+    pdb.execute(
+        "INSERT OR REPLACE INTO presence (user, last_seen, state) VALUES (?, ?, ?)",
+        ("alice", int(time.time()), "active"),
+    )
+    pdb.commit()
+    pdb.close()
+    data = alice.get("/online_users").get_json()
+    assert data.get("alice") == "active"
+
+
+# ── GET /messages/<channel> ───────────────────────────────────────────────────
+
+
+def test_messages_unauthenticated(client):
+    resp = client.get("/messages/general")
+    assert resp.status_code == 302
+
+
+def test_messages_empty_channel(alice):
+    resp = alice.get("/messages/general?after=0")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
+def test_messages_returns_messages(alice):
+    _insert_message("alice", "general", "test msg")
+    data = alice.get("/messages/general?after=0").get_json()
+    assert len(data) == 1
+    assert data[0]["content"] == "test msg"
+
+
+def test_messages_after_filter(alice):
+    t1 = time.time() - 10
+    t2 = time.time()
+    _insert_message("alice", "general", "old", ts=t1)
+    _insert_message("alice", "general", "new", ts=t2)
+    data = alice.get(f"/messages/general?after={t1 + 1}").get_json()
+    contents = [m["content"] for m in data]
+    assert "new" in contents
+    assert "old" not in contents
+
+
+def _seed_history(count, channel="general", base=None):
+    """Insert *count* messages one second apart, oldest first."""
+    base = base or (time.time() - count - 10)
+    for i in range(count):
+        _insert_message("alice", channel, f"msg-{i}", ts=base + i, sender="alice")
+    return base
+
+
+# ── History paging ────────────────────────────────────────────────────────────
+# A first load takes a page instead of the whole channel; /messages_before walks
+# backwards from there.
+
+
+def test_messages_first_page_is_capped(alice):
+    _seed_history(30)
+    data = alice.get("/messages/general?after=0&limit=10").get_json()
+    assert len(data) == 10
+
+
+def test_messages_first_page_returns_the_newest_messages(alice):
+    _seed_history(30)
+    page = alice.get("/messages/general?after=0&limit=10").get_json()
+    everything = alice.get("/messages/general?after=0").get_json()
+    assert [m["id"] for m in page] == [m["id"] for m in everything[-10:]]
+
+
+def test_messages_first_page_is_chronological(alice):
+    _seed_history(30)
+    page = alice.get("/messages/general?after=0&limit=10").get_json()
+    assert [m["ts"] for m in page] == sorted(m["ts"] for m in page)
+
+
+def test_messages_delta_is_not_capped(alice):
+    """Only first loads page; a cursor fetch must return everything it owes."""
+    base = _seed_history(30)
+    data = alice.get(f"/messages/general?after={base - 1}&limit=10").get_json()
+    assert len(data) == 30
+
+
+def test_messages_before_returns_preceding_page(alice):
+    _seed_history(30)
+    page = alice.get("/messages/general?after=0&limit=10").get_json()
+    older = alice.get(
+        f"/messages_before/general?before={page[0]['ts']}&limit=10"
+    ).get_json()
+
+    assert len(older) == 10
+    assert all(m["ts"] < page[0]["ts"] for m in older)
+    assert not ({m["id"] for m in older} & {m["id"] for m in page})
+    assert [m["ts"] for m in older] == sorted(m["ts"] for m in older)
+
+
+def test_messages_before_walks_back_to_the_whole_channel(alice):
+    _seed_history(30)
+    page = alice.get("/messages/general?after=0&limit=10").get_json()
+
+    collected = list(page)
+    cursor = page[0]["ts"]
+    while True:
+        batch = alice.get(
+            f"/messages_before/general?before={cursor}&limit=10"
+        ).get_json()
+        if not batch:
+            break
+        collected = batch + collected
+        cursor = batch[0]["ts"]
+        if len(batch) < 10:
+            break
+
+    everything = alice.get("/messages/general?after=0").get_json()
+    assert [m["id"] for m in collected] == [m["id"] for m in everything]
+
+
+def test_messages_before_short_page_signals_start_of_channel(alice):
+    _seed_history(12)
+    page = alice.get("/messages/general?after=0&limit=10").get_json()
+    older = alice.get(
+        f"/messages_before/general?before={page[0]['ts']}&limit=10"
+    ).get_json()
+    assert len(older) == 2
+
+
+def test_messages_before_omits_deleted(alice):
+    base = _seed_history(5)
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "UPDATE messages SET deleted = 1, deleted_ts = ? WHERE content = 'msg-2'",
+        (time.time(),),
+    )
+    db.commit()
+    db.close()
+
+    older = alice.get(f"/messages_before/general?before={base + 100}").get_json()
+    assert "msg-2" not in [m["content"] for m in older]
+
+
+def test_messages_before_caps_limit(alice):
+    _seed_history(30)
+    data = alice.get(
+        f"/messages_before/general?before={time.time()}&limit=99999"
+    ).get_json()
+    assert len(data) <= 200
+
+
+def test_messages_before_unauthenticated(client):
+    resp = client.get("/messages_before/general?before=1")
+    assert resp.status_code == 302
+
+
+def test_messages_before_rejects_channel_user_cannot_see(alice):
+    resp = alice.get("/messages_before/dm:bob:charlie?before=1")
+    assert resp.status_code == 403
+
+
+def test_messages_before_rejects_missing_cursor(alice):
+    assert alice.get("/messages_before/general").status_code == 400
+
+
+def test_messages_before_rejects_non_numeric_cursor(alice):
+    assert alice.get("/messages_before/general?before=abc").status_code == 400
+
+
+def test_messages_before_rejects_nan_cursor(alice):
+    """NaN compares false against every timestamp, so it must not reach SQL."""
+    assert alice.get("/messages_before/general?before=NaN").status_code == 400
+
+
+def test_messages_nan_after(alice):
+    _insert_message("alice", "general", "msg")
+    data = alice.get("/messages/general?after=NaN").get_json()
+    assert len(data) == 1
+
+
+def test_messages_invalid_after(alice):
+    _insert_message("alice", "general", "msg")
+    data = alice.get("/messages/general?after=abc").get_json()
+    assert len(data) == 1
+
+
+def test_messages_includes_reactions(alice):
+    msg_id, ts = _insert_message("alice", "general", "react me")
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO reactions (message_id, emoji, reactor) VALUES (?, ?, ?)",
+        (msg_id, "thumbs_up", "alice"),
+    )
+    db.commit()
+    db.close()
+    data = alice.get("/messages/general?after=0").get_json()
+    assert data[0]["reactions"] is not None
+    rx = json.loads(data[0]["reactions"])
+    assert "thumbs_up" in rx
+
+
+def test_messages_deleted_tombstone(alice):
+    msg_id, ts = _insert_message("alice", "general", "bye")
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "UPDATE messages SET deleted=1, deleted_ts=? WHERE id=?",
+        (time.time(), msg_id),
+    )
+    db.commit()
+    db.close()
+    data = alice.get("/messages/general?after=0").get_json()
+    deleted = [m for m in data if m["deleted"]]
+    assert len(deleted) == 1
+
+
+# ── POST /send/<channel> ──────────────────────────────────────────────────────
+
+
+def test_send_unauthenticated(client):
+    resp = client.post("/send/general", data={"text": "hi"})
+    assert resp.status_code == 302
+
+
+def test_send_forbidden_channel(alice):
+    resp = alice.post("/send/secret-channel", data={"text": "hi"})
+    assert resp.status_code == 403
+
+
+def test_send_empty(alice):
+    resp = alice.post("/send/general", data={"text": ""})
+    assert resp.status_code == 400
+
+
+def test_send_text_message(alice):
+    resp = alice.post("/send/general", data={"text": "hello world"})
+    assert resp.status_code == 200
+    assert resp.data == b"ok"
+
+
+def test_send_stores_in_db(alice):
+    alice.post("/send/general", data={"text": "stored msg"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT content FROM messages WHERE channel='general'").fetchone()
+    db.close()
+    assert row is not None
+    assert row[0] == "stored msg"
+
+
+def test_send_propagates_to_all_users(alice_and_bob):
+    alice_and_bob.post("/send/general", data={"text": "broadcast"})
+    bob_db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = bob_db.execute(
+        "SELECT content FROM messages WHERE channel='general'"
+    ).fetchone()
+    bob_db.close()
+    assert row is not None
+    assert row[0] == "broadcast"
+
+
+def test_send_dm_channel(alice_and_bob):
+    resp = alice_and_bob.post("/send/dm:alice:bob", data={"text": "private"})
+    assert resp.status_code == 200
+
+
+def test_send_dm_forbidden_for_outsider(alice_and_bob):
+    resp = alice_and_bob.post("/send/dm:bob:charlie", data={"text": "hack"})
+    assert resp.status_code == 403
+
+
+def test_send_with_reply_to(alice):
+    msg_id, _ = _insert_message("alice", "general", "parent")
+    resp = alice.post(
+        "/send/general", data={"text": "reply", "reply_to_id": str(msg_id)}
+    )
+    assert resp.status_code == 200
+
+
+def test_send_with_invalid_reply_to(alice):
+    resp = alice.post(
+        "/send/general", data={"text": "reply", "reply_to_id": "notanint"}
+    )
+    assert resp.status_code == 200
+
+
+def test_send_file(alice, tmp_path):
+    import minimost.chat as chat
+
+    chat.UPLOAD_DIR.mkdir(exist_ok=True)
+    img = io.BytesIO(b"\xff\xd8\xff" + b"\x00" * 10)
+    resp = alice.post(
+        "/send/general",
+        data={"text": "", "files": (img, "photo.jpg")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+
+
+def test_send_file_any_extension(alice):
+    import minimost.chat as chat
+
+    chat.UPLOAD_DIR.mkdir(exist_ok=True)
+    exe = io.BytesIO(b"MZ" + b"\x00" * 10)
+    resp = alice.post(
+        "/send/general",
+        data={"text": "", "files": (exe, "document.exe")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200
+
+
+def test_send_file_too_large(alice):
+    import minimost.chat as chat
+
+    orig = chat._max_upload_size_bytes
+    chat._max_upload_size_bytes = lambda: 5  # 5 bytes limit
+    try:
+        big = io.BytesIO(b"\x00" * 10)
+        resp = alice.post(
+            "/send/general",
+            data={"text": "", "files": (big, "big.bin")},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 413
+    finally:
+        chat._max_upload_size_bytes = orig
+
+
+# ── GET /message/<id> ─────────────────────────────────────────────────────────
+
+
+def test_get_message_found(alice):
+    msg_id, _ = _insert_message("alice", "general", "single")
+    resp = alice.get(f"/message/{msg_id}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["content"] == "single"
+
+
+def test_get_message_not_found(alice):
+    resp = alice.get("/message/99999")
+    assert resp.status_code == 404
+
+
+# ── GET /files/<filename> ─────────────────────────────────────────────────────
+
+
+def test_files_unauthenticated(client):
+    resp = client.get("/files/something.jpg")
+    assert resp.status_code == 302
+
+
+def _attach(filename, channel="general", sender="alice", data=b"\xff\xd8\xff"):
+    """Write an upload and the message row that carries it."""
+    (chat_mod.UPLOAD_DIR / filename).write_bytes(data)
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, filename, ts) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel, sender, "", filename, time.time()),
+    )
+    db.commit()
+    db.close()
+
+
+def test_files_serves_file(alice):
+    fname = "test_img.jpg"
+    _attach(fname)
+    resp = alice.get(f"/files/{fname}")
+    assert resp.status_code == 200
+    resp.close()  # release the send_file handle so it isn't GC'd as a ResourceWarning
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+# Uploads sit in one flat directory addressed by name, so without a visibility
+# check the 32-char UUID in the name is the only thing protecting an attachment
+# posted to a private channel or DM.
+
+
+def test_files_denies_attachment_from_dm_user_is_not_in(app, isolated_dbs):
+    _add_user("alice")
+    fname = "deadbeef_secret.txt"
+    _attach(fname, channel="dm:alice:bob", sender="bob", data=b"private")
+    outsider = _client_for(app, "mallory")
+
+    resp = outsider.get(f"/files/{fname}")
+    assert resp.status_code == 404
+    resp.close()
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+def test_file_preview_denies_attachment_from_dm_user_is_not_in(app, isolated_dbs):
+    _add_user("alice")
+    fname = "deadbeef_secret.py"
+    _attach(fname, channel="dm:alice:bob", sender="bob", data=b"print('secret')")
+    outsider = _client_for(app, "mallory")
+
+    assert outsider.get(f"/file_preview/{fname}").status_code == 404
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+def test_files_allows_attachment_from_dm_user_is_in(app, isolated_dbs):
+    fname = "deadbeef_shared.txt"
+    _attach(fname, channel="dm:alice:bob", sender="bob", data=b"ours")
+    member = _client_for(app, "alice")
+
+    resp = member.get(f"/files/{fname}")
+    assert resp.status_code == 200
+    resp.close()
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+def test_files_allows_attachment_from_public_channel(app, isolated_dbs):
+    _add_user("alice")
+    fname = "deadbeef_public.txt"
+    _attach(fname, channel="general", data=b"public")
+    other = _client_for(app, "mallory")
+
+    resp = other.get(f"/files/{fname}")
+    assert resp.status_code == 200
+    resp.close()
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+def test_files_denies_orphan_upload(alice):
+    """A file on disk with no message referencing it is not served."""
+    fname = "orphan.txt"
+    (chat_mod.UPLOAD_DIR / fname).write_bytes(b"orphan")
+
+    resp = alice.get(f"/files/{fname}")
+    assert resp.status_code == 404
+    resp.close()
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+# ── GET /search_messages ──────────────────────────────────────────────────────
+
+
+def test_search_empty_query(alice):
+    resp = alice.get("/search_messages?q=")
+    assert resp.status_code == 200
+    assert resp.get_json() == []
+
+
+def test_search_no_results(alice):
+    _insert_message("alice", "general", "hello")
+    data = alice.get("/search_messages?q=zzz").get_json()
+    assert data == []
+
+
+def test_search_finds_match(alice):
+    _insert_message("alice", "general", "find me please")
+    data = alice.get("/search_messages?q=find me").get_json()
+    assert len(data) == 1
+    assert data[0]["content"] == "find me please"
+
+
+def test_search_no_filters_returns_empty(alice):
+    _insert_message("alice", "general", "hello")
+    assert alice.get("/search_messages").get_json() == []
+
+
+def test_search_filter_by_sender(alice):
+    _insert_message("alice", "general", "from alice", sender="alice")
+    _insert_message("alice", "general", "from bob", sender="bob")
+    data = alice.get("/search_messages?from=bob").get_json()
+    assert [m["content"] for m in data] == ["from bob"]
+
+
+def test_search_filter_by_sender_is_case_insensitive(alice):
+    _insert_message("alice", "general", "from bob", sender="bob")
+    data = alice.get("/search_messages?from=BOB").get_json()
+    assert len(data) == 1
+
+
+def test_search_filter_by_channel(alice):
+    _insert_message("alice", "general", "in general")
+    _insert_message("alice", "software", "in software")
+    data = alice.get("/search_messages?channel=software").get_json()
+    assert [m["content"] for m in data] == ["in software"]
+
+
+def test_search_filter_by_date_range(alice):
+    _insert_message("alice", "general", "old", ts=1000.0)
+    _insert_message("alice", "general", "mid", ts=2000.0)
+    _insert_message("alice", "general", "new", ts=3000.0)
+    data = alice.get("/search_messages?start=1500&end=2500").get_json()
+    assert [m["content"] for m in data] == ["mid"]
+
+
+def test_search_filters_combine(alice):
+    _insert_message("alice", "general", "keep", sender="bob", ts=2000.0)
+    _insert_message("alice", "general", "wrong sender", sender="carol", ts=2000.0)
+    _insert_message("alice", "random", "wrong channel", sender="bob", ts=2000.0)
+    _insert_message("alice", "general", "too old", sender="bob", ts=100.0)
+    data = alice.get("/search_messages?from=bob&channel=general&start=1000").get_json()
+    assert [m["content"] for m in data] == ["keep"]
+
+
+def test_search_ignores_invalid_date(alice):
+    """A non-numeric date bound is dropped rather than rejected."""
+    _insert_message("alice", "general", "hello")
+    data = alice.get("/search_messages?q=hello&start=notanumber").get_json()
+    assert len(data) == 1
+
+
+def test_search_matches_mid_word_substring(alice):
+    """The trigram index keeps substring (not just whole-word) matching."""
+    _insert_message("alice", "general", "hello world")
+    data = alice.get("/search_messages?q=ell").get_json()
+    assert [m["content"] for m in data] == ["hello world"]
+
+
+def test_search_short_query_falls_back_to_like(alice):
+    """Queries shorter than the trigram width still match via the LIKE scan."""
+    _insert_message("alice", "general", "hi there")
+    data = alice.get("/search_messages?q=hi").get_json()
+    assert [m["content"] for m in data] == ["hi there"]
+
+
+def test_search_index_reflects_edits(alice):
+    """Editing a message re-indexes it: new text matches, old text does not."""
+    msg_id, _ = _insert_message("alice", "general", "original wording")
+    alice.post(f"/edit/{msg_id}", data={"text": "replacement wording"})
+    assert alice.get("/search_messages?q=replacement").get_json()
+    assert alice.get("/search_messages?q=original").get_json() == []
+
+
+def test_search_index_reflects_hard_delete(alice):
+    """A hard-deleted row leaves the search index (via the delete trigger)."""
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES "
+        "('general', 'alice', 'ephemeral note', 1.0)"
+    )
+    db.commit()
+    db.execute("DELETE FROM messages WHERE content = 'ephemeral note'")
+    db.commit()
+    db.close()
+    assert alice.get("/search_messages?q=ephemeral").get_json() == []
+
+
+# ── POST /edit/<id> ───────────────────────────────────────────────────────────
+
+
+def test_edit_unauthenticated(client):
+    resp = client.post("/edit/1", data={"text": "new"})
+    assert resp.status_code == 302
+
+
+def test_edit_success(alice):
+    msg_id, _ = _insert_message("alice", "general", "original")
+    resp = alice.post(f"/edit/{msg_id}", data={"text": "edited"})
+    assert resp.status_code == 200
+    assert resp.data == b"ok"
+
+
+def test_edit_updates_content(alice):
+    msg_id, _ = _insert_message("alice", "general", "original")
+    alice.post(f"/edit/{msg_id}", data={"text": "new text"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute(
+        "SELECT content, edited FROM messages WHERE id=?", (msg_id,)
+    ).fetchone()
+    db.close()
+    assert row[0] == "new text"
+    assert row[1] == 1
+
+
+def test_edit_forbidden_for_other_user(alice_and_bob, app):
+    _insert_message("bob", "general", "bobs msg")
+    bob_db = sqlite3.connect(str(common_mod.shared_db_path()))
+    bob_row = bob_db.execute(
+        "SELECT id FROM messages WHERE content='bobs msg'"
+    ).fetchone()
+    bob_db.close()
+
+    resp = alice_and_bob.post(f"/edit/{bob_row[0]}", data={"text": "hacked"})
+    assert resp.status_code == 403
+
+
+def test_edit_not_found(alice):
+    resp = alice.post("/edit/99999", data={"text": "x"})
+    assert resp.status_code == 403
+
+
+def test_edit_visible_to_other_users(alice_and_bob):
+    """An edit to the single shared row is immediately seen by everyone."""
+    msg_id, _ = _insert_message("alice", "general", "original")
+
+    alice_and_bob.post(f"/edit/{msg_id}", data={"text": "edited"})
+
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT content FROM messages WHERE id=?", (msg_id,)).fetchone()
+    db.close()
+    assert row[0] == "edited"
+
+
+# ── POST /delete/<id> ─────────────────────────────────────────────────────────
+
+
+def test_delete_unauthenticated(client):
+    resp = client.post("/delete/1")
+    assert resp.status_code == 302
+
+
+def test_delete_success(alice):
+    msg_id, _ = _insert_message("alice", "general", "bye")
+    resp = alice.post(f"/delete/{msg_id}")
+    assert resp.status_code == 200
+    assert resp.data == b"ok"
+
+
+def test_delete_marks_deleted(alice):
+    msg_id, _ = _insert_message("alice", "general", "bye")
+    alice.post(f"/delete/{msg_id}")
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT deleted FROM messages WHERE id=?", (msg_id,)).fetchone()
+    db.close()
+    assert row[0] == 1
+
+
+def test_delete_forbidden_for_other_user(alice_and_bob):
+    ts = time.time()
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        ("general", "bob", "bob msg", ts),
+    )
+    db.commit()
+    row_id = db.execute("SELECT id FROM messages WHERE ts=?", (ts,)).fetchone()[0]
+    db.close()
+    resp = alice_and_bob.post(f"/delete/{row_id}")
+    assert resp.status_code == 403
+
+
+def test_delete_not_found(alice):
+    resp = alice.post("/delete/99999")
+    assert resp.status_code == 403
+
+
+# ── POST /react/<id> ──────────────────────────────────────────────────────────
+
+
+def test_react_unauthenticated(client):
+    resp = client.post("/react/1", data={"reaction": "thumbs_up"})
+    assert resp.status_code == 302
+
+
+def test_react_invalid_reaction(alice):
+    msg_id, _ = _insert_message("alice", "general", "msg")
+    resp = alice.post(f"/react/{msg_id}", data={"reaction": "not_a_real_emoji_xyz"})
+    assert resp.status_code == 400
+
+
+def test_react_not_found(alice):
+    valid = next(iter(chat_mod.VALID_REACTIONS)) if chat_mod.VALID_REACTIONS else None
+    if valid is None:
+        return
+    resp = alice.post("/react/99999", data={"reaction": valid})
+    assert resp.status_code == 404
+
+
+def test_react_success(alice):
+    valid = next(iter(chat_mod.VALID_REACTIONS)) if chat_mod.VALID_REACTIONS else None
+    if valid is None:
+        return
+    msg_id, _ = _insert_message("alice", "general", "msg")
+    resp = alice.post(f"/react/{msg_id}", data={"reaction": valid})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert valid in data
+
+
+def test_react_toggle_removes(alice):
+    valid = next(iter(chat_mod.VALID_REACTIONS)) if chat_mod.VALID_REACTIONS else None
+    if valid is None:
+        return
+    msg_id, _ = _insert_message("alice", "general", "msg")
+    alice.post(f"/react/{msg_id}", data={"reaction": valid})
+    resp = alice.post(f"/react/{msg_id}", data={"reaction": valid})
+    data = resp.get_json()
+    assert valid not in data or "alice" not in data.get(valid, [])
+
+
+# ── POST /mark_read/<channel> ─────────────────────────────────────────────────
+
+
+def test_mark_read_unauthenticated(client):
+    resp = client.post("/mark_read/general")
+    assert resp.status_code == 302
+
+
+def test_mark_read_returns_204(alice):
+    resp = alice.post("/mark_read/general")
+    assert resp.status_code == 204
+
+
+def test_mark_read_advances_watermark(alice):
+    ts = time.time()
+    _insert_message("alice", "general", "unread", ts=ts, sender="bob")
+    alice.post("/mark_read/general")
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute(
+        "SELECT last_read_ts FROM read_state WHERE user='alice' AND channel='general'"
+    ).fetchone()
+    db.close()
+    assert row is not None
+    assert row[0] >= ts
+
+
+def test_mark_read_clears_unread_count(alice):
+    _insert_message("alice", "general", "unread", sender="bob")
+    assert alice.get("/channel_unreads").get_json()["general"] == 1
+    alice.post("/mark_read/general")
+    assert alice.get("/channel_unreads").get_json()["general"] == 0
+
+
+def test_mark_read_no_unread_messages(alice):
+    resp = alice.post("/mark_read/general")
+    assert resp.status_code == 204
+
+
+# ── GET /last_read/<channel> ──────────────────────────────────────────────────
+
+
+def test_last_read_unauthenticated(client):
+    resp = client.get("/last_read/general")
+    assert resp.status_code == 302
+
+
+def test_last_read_null_before_first_visit(alice):
+    resp = alice.get("/last_read/general")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"last_read_ts": None}
+
+
+def test_last_read_returns_watermark(alice):
+    ts = time.time()
+    _insert_message("alice", "general", "unread", ts=ts, sender="bob")
+    alice.post("/mark_read/general")
+
+    data = alice.get("/last_read/general").get_json()
+    assert data["last_read_ts"] >= ts
+
+
+def test_last_read_is_read_before_mark_read_advances_it(alice):
+    """The boundary the "New messages" divider is drawn at.
+
+    Reading it must reflect where the user left off, not where they are now —
+    otherwise the divider would always land past every message.
+    """
+    first = time.time() - 100
+    _insert_message("alice", "general", "old", ts=first, sender="bob")
+    alice.post("/mark_read/general")
+
+    _insert_message("alice", "general", "new", ts=time.time(), sender="bob")
+    boundary = alice.get("/last_read/general").get_json()["last_read_ts"]
+
+    assert boundary == first
+
+
+def test_last_read_rejects_channel_user_cannot_see(alice):
+    resp = alice.get("/last_read/private:9999")
+    assert resp.status_code == 403
+
+
+# ── GET /read_receipts/<channel> ──────────────────────────────────────────────
+
+
+def test_read_receipts_empty(alice):
+    data = alice.get("/read_receipts/general").get_json()
+    assert data == {}
+
+
+def test_read_receipts_returns_watermarks(alice):
+    # The endpoint returns each user's read watermark; the client derives the
+    # per-message receipts from it.
+    ts = time.time()
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO read_state (user, channel, last_read_ts) VALUES (?,?,?)",
+        ("bob", "general", ts),
+    )
+    db.commit()
+    db.close()
+    data = alice.get("/read_receipts/general").get_json()
+    assert data == {"bob": ts}
+
+
+# ── GET /users ────────────────────────────────────────────────────────────────
+
+
+def test_users_unauthenticated(client):
+    resp = client.get("/users")
+    assert resp.status_code == 302
+
+
+def test_users_excludes_self(alice_and_bob):
+    data = alice_and_bob.get("/users").get_json()
+    assert "alice" not in data
+    assert "bob" in data
+
+
+# ── GET /link_preview ─────────────────────────────────────────────────────────
+
+
+def test_link_preview_empty_url(alice):
+    resp = alice.get("/link_preview?url=")
+    assert resp.status_code == 200
+    assert resp.get_json() == {}
+
+
+def test_link_preview_missing_url(alice):
+    resp = alice.get("/link_preview")
+    assert resp.status_code == 200
+    assert resp.get_json() == {}
+
+
+def test_link_preview_ssrf_blocked(alice):
+    resp = alice.get("/link_preview?url=http://192.168.1.1/")
+    assert resp.get_json() == {}
+
+
+def test_link_preview_unauthenticated(client):
+    resp = client.get("/link_preview?url=https://example.com")
+    assert resp.status_code == 302
+
+
+# ── POST /delete_account ──────────────────────────────────────────────────────
+
+
+def test_delete_account_unauthenticated(client):
+    resp = client.post("/delete_account", json={"type": "soft", "password": "x"})
+    assert resp.status_code == 302
+
+
+def test_delete_account_invalid_type(alice):
+    resp = alice.post(
+        "/delete_account", json={"type": "purge", "password": "Password1!"}
+    )
+    assert resp.status_code == 400
+
+
+def test_delete_account_wrong_password(alice):
+    resp = alice.post("/delete_account", json={"type": "soft", "password": "wrong"})
+    assert resp.status_code == 403
+
+
+def test_delete_account_soft(alice):
+    _insert_message("alice", "general", "to be anonymised")
+    resp = alice.post(
+        "/delete_account", json={"type": "soft", "password": "Password1!"}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+    # Message still exists but sender renamed
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT sender FROM messages WHERE channel='general'").fetchone()
+    db.close()
+    assert row[0] == "Deleted User"
+
+
+def test_delete_account_hard(alice):
+    _insert_message("alice", "general", "to be deleted")
+    resp = alice.post(
+        "/delete_account", json={"type": "hard", "password": "Password1!"}
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "ok"
+
+
+def test_delete_account_soft_cleans_presence(alice):
+    import minimost.presence as pres
+
+    db = sqlite3.connect(pres.PRESENCE_DB)
+    db.execute(
+        "INSERT OR IGNORE INTO presence (user, state, last_seen) VALUES ('alice','active',0)"
+    )
+    db.commit()
+    db.close()
+    alice.post("/delete_account", json={"type": "soft", "password": "Password1!"})
+    db = sqlite3.connect(pres.PRESENCE_DB)
+    row = db.execute("SELECT * FROM presence WHERE user='alice'").fetchone()
+    db.close()
+    assert row is None
+
+
+# ── Message storage (each send is its own row; grouping is frontend-only) ─────
+
+
+def test_send_keeps_recent_message_separate(alice):
+    """A quick follow-up is a distinct row, not merged into the previous one."""
+    import time as _time
+
+    ts = _time.time() - 10  # 10 s ago — would have been within the old window
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        ("general", "alice", "first line", ts),
+    )
+    db.commit()
+    db.close()
+    resp = alice.post("/send/general", data={"text": "second line"})
+    assert resp.status_code == 200
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    rows = db.execute(
+        "SELECT content FROM messages WHERE channel='general' ORDER BY ts"
+    ).fetchall()
+    db.close()
+    assert [r[0] for r in rows] == ["first line", "second line"]
+
+
+def test_send_keeps_old_message_separate(alice):
+    import time as _time
+
+    ts = _time.time() - 400
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, ts) VALUES (?, ?, ?, ?)",
+        ("general", "alice", "old message", ts),
+    )
+    db.commit()
+    db.close()
+    alice.post("/send/general", data={"text": "new message"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    rows = db.execute(
+        "SELECT content FROM messages WHERE channel='general' ORDER BY ts"
+    ).fetchall()
+    db.close()
+    assert len(rows) == 2
+
+
+# ── GET /files/<filename> — attachment download ───────────────────────────────
+
+
+def test_files_attachment_content_disposition(alice):
+    """UUID-prefixed filenames expose the original name as the download name."""
+    # 32 hex chars + underscore + original name
+    fname = "a" * 32 + "_report.pdf"
+    _attach(fname, data=b"%PDF")
+    resp = alice.get(f"/files/{fname}?download=1")
+    assert resp.status_code == 200
+    resp.close()  # release the send_file handle so it isn't GC'd as a ResourceWarning
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+# ── GET /file_preview/<filename> ─────────────────────────────────────────────
+
+
+def test_file_preview_unauthenticated(client):
+    resp = client.get("/file_preview/hello.py")
+    assert resp.status_code == 302
+
+
+def test_file_preview_unknown_extension(alice):
+    fname = "image.jpg"
+    _attach(fname, data=b"\xff\xd8")
+    resp = alice.get(f"/file_preview/{fname}")
+    assert resp.status_code == 200
+    assert resp.get_json() == {}
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+def test_file_preview_text_file(alice):
+    fname = "script.py"
+    _attach(fname, data=b"print('hello')")
+    resp = alice.get(f"/file_preview/{fname}")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "content" in data or "lines" in data or data != {}
+    (chat_mod.UPLOAD_DIR / fname).unlink()
+
+
+def test_file_preview_bad_filename(alice):
+    resp = alice.get("/file_preview/")
+    assert resp.status_code in (404, 302, 308)
+
+
+def test_file_preview_missing_file(alice):
+    """404, not an empty preview.
+
+    Previews are gated on the caller being able to see a message carrying the
+    file, so a name with no such message is indistinguishable from one they are
+    not allowed to see — both 404. The client already treats a non-JSON
+    response as "no preview".
+    """
+    resp = alice.get("/file_preview/nonexistent.py")
+    assert resp.status_code == 404
+
+
+# ── @-mentions ────────────────────────────────────────────────────────────────
+
+
+def test_extract_mentions_matches_members(alice_and_bob):
+    mentions = chat_mod.extract_mentions("hey @bob and @nobody", "general")
+    assert mentions == ["bob"]
+
+
+def test_extract_mentions_case_insensitive(alice_and_bob):
+    assert chat_mod.extract_mentions("yo @BOB", "general") == ["bob"]
+
+
+def test_extract_mentions_ignores_emails(alice_and_bob):
+    assert chat_mod.extract_mentions("mail me at foo@bob.com", "general") == []
+
+
+def test_extract_mentions_empty_text(alice_and_bob):
+    assert chat_mod.extract_mentions("", "general") == []
+    assert chat_mod.extract_mentions("no pings here", "general") == []
+
+
+def test_send_stores_mentions(alice_and_bob):
+    alice_and_bob.post("/send/general", data={"text": "ping @bob"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT mentions FROM messages WHERE channel='general'").fetchone()
+    db.close()
+    assert json.loads(row[0]) == ["bob"]
+
+
+def test_send_no_mentions_stores_null(alice_and_bob):
+    alice_and_bob.post("/send/general", data={"text": "plain message"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT mentions FROM messages WHERE channel='general'").fetchone()
+    db.close()
+    assert row[0] is None
+
+
+def test_messages_returns_mentions(alice_and_bob):
+    alice_and_bob.post("/send/general", data={"text": "ping @bob"})
+    data = alice_and_bob.get("/messages/general?after=0").get_json()
+    assert json.loads(data[0]["mentions"]) == ["bob"]
+
+
+def test_edit_updates_mentions(alice_and_bob):
+    alice_and_bob.post("/send/general", data={"text": "no ping"})
+    msg = alice_and_bob.get("/messages/general?after=0").get_json()[0]
+    alice_and_bob.post(f"/edit/{msg['id']}", data={"text": "now @bob"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT mentions FROM messages WHERE channel='general'").fetchone()
+    db.close()
+    assert json.loads(row[0]) == ["bob"]
+
+
+def test_channel_members_excludes_self(alice_and_bob):
+    data = alice_and_bob.get("/channel_members/general").get_json()
+    assert "bob" in data
+    assert "alice" not in data
+
+
+def test_channel_members_forbidden(alice_and_bob):
+    resp = alice_and_bob.get("/channel_members/dm:bob:charlie")
+    assert resp.status_code == 403
+
+
+def test_channel_members_dm(alice_and_bob):
+    data = alice_and_bob.get("/channel_members/dm:alice:bob").get_json()
+    assert data == ["bob"]
+
+
+def test_extract_mentions_everyone(alice_and_bob):
+    assert chat_mod.extract_mentions("hey @everyone", "general") == [
+        chat_mod.MENTION_EVERYONE
+    ]
+
+
+def test_extract_mentions_everyone_overrides_others(alice_and_bob):
+    # @everyone already covers every member, so it collapses other mentions.
+    assert chat_mod.extract_mentions("@bob @everyone", "general") == [
+        chat_mod.MENTION_EVERYONE
+    ]
+
+
+def test_send_everyone_stores_sentinel(alice_and_bob):
+    alice_and_bob.post("/send/general", data={"text": "listen up @everyone"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT mentions FROM messages WHERE channel='general'").fetchone()
+    db.close()
+    assert json.loads(row[0]) == [chat_mod.MENTION_EVERYONE]
+
+
+# ── GET /mentions (mentions channel) ──────────────────────────────────────────
+
+
+def _as(client, user):
+    """Switch *client*'s session to act as *user* (a registered account)."""
+    with client.session_transaction() as sess:
+        sess["user"] = user
+
+
+def test_mentions_direct(alice_and_bob):
+    c = alice_and_bob
+    _as(c, "bob")
+    c.post("/send/general", data={"text": "hey @alice look here"})
+    _as(c, "alice")
+    data = c.get("/mentions").get_json()
+    assert len(data) == 1
+    assert data[0]["sender"] == "bob"
+    assert data[0]["channel"] == "general"
+    assert "look here" in data[0]["content"]
+
+
+def test_mentions_everyone_visible_to_recipient(alice_and_bob):
+    c = alice_and_bob
+    _as(c, "bob")
+    c.post("/send/general", data={"text": "ship it @everyone"})
+    _as(c, "alice")
+    data = c.get("/mentions").get_json()
+    assert len(data) == 1
+    assert data[0]["sender"] == "bob"
+
+
+def test_mentions_everyone_excludes_sender(alice_and_bob):
+    # The sender of an @everyone is not mentioning themselves.
+    alice_and_bob.post("/send/general", data={"text": "ship it @everyone"})
+    data = alice_and_bob.get("/mentions").get_json()
+    assert data == []
+
+
+def test_mentions_excludes_self_sent_direct(alice_and_bob):
+    # alice mentioning bob must not appear in alice's own mentions list.
+    alice_and_bob.post("/send/general", data={"text": "yo @bob"})
+    data = alice_and_bob.get("/mentions").get_json()
+    assert data == []
+
+
+def test_mentions_cleared_after_mark_read(alice_and_bob):
+    c = alice_and_bob
+    _as(c, "bob")
+    c.post("/send/general", data={"text": "ping @alice"})
+    _as(c, "alice")
+    assert len(c.get("/mentions").get_json()) == 1
+    c.post("/mark_read/general")
+    assert c.get("/mentions").get_json() == []
+
+
+def test_mentions_excludes_deleted(alice_and_bob):
+    c = alice_and_bob
+    _as(c, "bob")
+    c.post("/send/general", data={"text": "ping @alice"})
+    msg = c.get("/messages/general?after=0").get_json()[0]
+    c.post(f"/delete/{msg['id']}")
+    _as(c, "alice")
+    assert c.get("/mentions").get_json() == []
+
+
+def test_mentions_private_channel_access(alice_and_bob):
+    c = alice_and_bob
+    _add_user("charlie")
+    # alice creates a private channel with bob; bob pings the whole channel.
+    resp = c.post(
+        "/private_channels/create",
+        json={"name": "secret", "members": ["bob"]},
+    )
+    pchannel = resp.get_json()["channel"]
+    _as(c, "bob")
+    c.post(f"/send/{pchannel}", data={"text": "huddle up @everyone"})
+
+    # alice (a member) sees the mention...
+    _as(c, "alice")
+    assert len(c.get("/mentions").get_json()) == 1
+    # ...charlie (not a member) does not.
+    _as(c, "charlie")
+    assert c.get("/mentions").get_json() == []
+
+
+# ── Editing and reacting to rows that have no editable body ───────────────────
+
+
+def test_edit_rejects_an_attachment_row(alice):
+    """An attachment row has no text body, so the edit can never apply.
+
+    The UPDATE's own ``filename IS NULL`` guard used to match nothing and the
+    route still answered "ok", so the client painted the edit as applied and
+    only a reload revealed it had never happened.
+    """
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, filename, ts)"
+        " VALUES ('general', 'alice', '', 'abc.png', ?)",
+        (time.time(),),
+    )
+    db.commit()
+    msg_id = db.execute("SELECT id FROM messages WHERE filename='abc.png'").fetchone()[
+        0
+    ]
+    db.close()
+
+    resp = alice.post(f"/edit/{msg_id}", data={"text": "nope"})
+    assert resp.status_code == 409
+
+
+def test_edit_rejects_a_deleted_message(alice):
+    msg_id, _ = _insert_message("alice", "general", "original")
+    alice.post(f"/delete/{msg_id}")
+    resp = alice.post(f"/edit/{msg_id}", data={"text": "back from the dead"})
+    assert resp.status_code == 409
+
+
+def test_edit_rejects_empty_text(alice):
+    msg_id, _ = _insert_message("alice", "general", "original")
+    resp = alice.post(f"/edit/{msg_id}", data={"text": "   "})
+    assert resp.status_code == 400
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    row = db.execute("SELECT content FROM messages WHERE id=?", (msg_id,)).fetchone()
+    db.close()
+    assert row[0] == "original"
+
+
+def test_react_rejects_a_deleted_message(alice):
+    valid = next(iter(chat_mod.VALID_REACTIONS)) if chat_mod.VALID_REACTIONS else None
+    if valid is None:
+        return
+    msg_id, _ = _insert_message("alice", "general", "msg")
+    alice.post(f"/delete/{msg_id}")
+    resp = alice.post(f"/react/{msg_id}", data={"reaction": valid})
+    assert resp.status_code == 404
+
+
+# ── content_type reaches the client ───────────────────────────────────────────
+
+
+def test_messages_carry_content_type(alice):
+    """Without this column every system notice renders as an ordinary message."""
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    db.execute(
+        "INSERT INTO messages (channel, sender, content, content_type, ts)"
+        " VALUES ('general', 'system', 'welcome', 'system', ?)",
+        (time.time(),),
+    )
+    db.commit()
+    db.close()
+
+    rows = alice.get("/messages/general?after=0").get_json()
+    assert rows
+    assert rows[-1]["content_type"] == "system"
+
+
+def test_message_history_page_carries_content_type(alice):
+    _insert_message("alice", "general", "plain")
+    rows = alice.get("/messages/general?after=0&limit=10").get_json()
+    assert rows
+    assert all("content_type" in r for r in rows)
+
+
+# ── DMs addressed to accounts that don't exist ────────────────────────────────
+# A DM channel is addressed by name rather than created through an endpoint, so
+# a mistyped or mis-cased participant used to open a normal-looking conversation
+# with nobody on the other end, and every message posted to it was accepted and
+# then went nowhere.
+
+
+def test_send_to_dm_with_unknown_participant_is_rejected(alice):
+    resp = alice.post("/send/dm:alice:ghost", data={"text": "into the void"})
+    assert resp.status_code == 400
+    assert b"ghost" in resp.data
+
+
+def test_send_to_dm_with_miscased_participant_is_rejected(alice_and_bob):
+    resp = alice_and_bob.post("/send/dm:BOB:alice", data={"text": "hi"})
+    assert resp.status_code == 400
+
+
+def test_send_to_a_real_dm_still_works(alice_and_bob):
+    resp = alice_and_bob.post("/send/dm:alice:bob", data={"text": "hi"})
+    assert resp.status_code == 200
+
+
+def test_rejected_dm_message_is_not_stored(alice):
+    alice.post("/send/dm:alice:ghost", data={"text": "into the void"})
+    db = sqlite3.connect(str(common_mod.shared_db_path()))
+    count = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE channel = 'dm:alice:ghost'"
+    ).fetchone()[0]
+    db.close()
+    assert count == 0
+
+
+def test_unknown_dm_participants_ignores_non_dm_channels(alice):
+    assert chat_mod.unknown_dm_participants("general") == []
+    assert chat_mod.unknown_dm_participants("private:1") == []

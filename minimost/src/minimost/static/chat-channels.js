@@ -1,0 +1,403 @@
+// ── Private Channels ──────────────────────────────────────────────────────────
+
+const createPrivateChModal = document.getElementById("create-private-ch-modal");
+const renamePrivateChModal = document.getElementById("rename-private-ch-modal");
+
+const privateChNameInput = document.getElementById("private-ch-name");
+const privateChMembersInput = document.getElementById(
+  "private-ch-members-input",
+);
+const privateChSuggestions = document.getElementById("private-ch-suggestions");
+const addMemberInput = document.getElementById("add-member-input");
+const addMemberSuggestions = document.getElementById("add-member-suggestions");
+
+let pcSuggestionIndex = -1;
+let pcCurrentSuggestions = [];
+let addMemberSuggIndex = -1;
+let addMemberCurrentSuggestions = [];
+
+// `globalThis.allUsers` / `globalThis.usersLoaded` are declared globally in chat-dm.js (loaded first)
+// and shared across the member-picker suggestions here.
+
+const MAX_CHANNEL_NAME_LEN = 80;
+
+function openCreatePrivateChannel() {
+  openModal(createPrivateChModal, {
+    label: "Create a private channel",
+    focus: privateChNameInput,
+  });
+  privateChNameInput.value = "";
+  privateChMembersInput.value = "";
+  privateChSuggestions.style.display = "none";
+  document.getElementById("private-ch-name-error").textContent = "";
+  if (!globalThis.usersLoaded) {
+    fetch("/users")
+      .then((r) => r.json())
+      .then((u) => {
+        globalThis.allUsers = u;
+        globalThis.usersLoaded = true;
+      });
+  }
+}
+
+function closeCreatePrivateChannel() {
+  closeModal(createPrivateChModal);
+}
+
+document.getElementById("private-ch-create-cancel").onclick =
+  closeCreatePrivateChannel;
+
+// Clicking the backdrop dismisses, matching every other modal in the app.
+createPrivateChModal.addEventListener("click", (e) => {
+  if (e.target === createPrivateChModal) closeCreatePrivateChannel();
+});
+
+document.getElementById("private-ch-create-btn").onclick = async () => {
+  const name = privateChNameInput.value.trim();
+  const nameError = document.getElementById("private-ch-name-error");
+  nameError.textContent = "";
+  if (!name) {
+    privateChNameInput.focus();
+    return;
+  }
+  if (name.length > MAX_CHANNEL_NAME_LEN) {
+    nameError.textContent = `Channel name must be ${MAX_CHANNEL_NAME_LEN} characters or fewer (${name.length}/${MAX_CHANNEL_NAME_LEN}).`;
+    privateChNameInput.focus();
+    return;
+  }
+
+  const raw = privateChMembersInput.value;
+  const members = raw
+    .split(",")
+    .map((u) => u.trim())
+    .filter(Boolean);
+
+  const resp = await fetch("/private_channels/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, members }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    if (resp.status === 429) {
+      showToast(
+        text || "You're creating channels too quickly. Please slow down.",
+      );
+    } else {
+      showToast("Failed to create channel: " + text);
+    }
+    return;
+  }
+
+  const data = await resp.json();
+  closeCreatePrivateChannel();
+  privateChannelMap[data.channel] = data.name;
+  loadSidebar();
+  switchChannel(data.channel);
+  focusMessageInput();
+};
+
+privateChMembersInput.addEventListener("input", () => {
+  if (!globalThis.usersLoaded) return;
+  const raw = privateChMembersInput.value;
+  const parts = raw.split(",").map((p) => p.trim());
+  const lastPart = parts[parts.length - 1].toLowerCase();
+  pcSuggestionIndex = -1;
+  if (!lastPart) {
+    privateChSuggestions.style.display = "none";
+    return;
+  }
+  const already = parts.slice(0, -1);
+  const matches = globalThis.allUsers
+    .filter((u) => !already.includes(u))
+    .map((u) => ({ user: u, result: fuzzySearch(lastPart, u) }))
+    .filter(({ result }) => result !== null)
+    .sort((a, b) => b.result.score - a.result.score);
+  pcCurrentSuggestions = matches.map((m) => m.user);
+  if (!pcCurrentSuggestions.length) {
+    privateChSuggestions.style.display = "none";
+    return;
+  }
+  privateChSuggestions.innerHTML = "";
+  matches.forEach(({ user, result }, idx) => {
+    const div = document.createElement("div");
+    div.className = "autocomplete-suggestion";
+    div.innerHTML = highlightFuzzyMatch(user, result.indices);
+    div.onclick = () => selectPCSuggestion(idx);
+    privateChSuggestions.appendChild(div);
+  });
+  privateChSuggestions.style.display = "block";
+});
+
+function selectPCSuggestion(idx) {
+  const raw = privateChMembersInput.value;
+  const parts = raw.split(",").map((p) => p.trim());
+  parts[parts.length - 1] = pcCurrentSuggestions[idx];
+  privateChMembersInput.value = parts.join(", ") + ", ";
+  privateChSuggestions.style.display = "none";
+  pcSuggestionIndex = -1;
+  privateChMembersInput.focus();
+}
+
+privateChMembersInput.addEventListener("keydown", (e) => {
+  const items = privateChSuggestions.children;
+  const visible = privateChSuggestions.style.display === "block";
+  if (e.key === "Tab" && visible && items.length) {
+    e.preventDefault();
+    selectPCSuggestion(Math.max(pcSuggestionIndex, 0));
+    return;
+  }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (visible && items.length) {
+      selectPCSuggestion(Math.max(pcSuggestionIndex, 0));
+      return;
+    }
+    document.getElementById("private-ch-create-btn").click();
+    return;
+  }
+  if (!visible) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    pcSuggestionIndex = (pcSuggestionIndex + 1) % items.length;
+    Array.from(items).forEach((el, i) =>
+      el.classList.toggle("active", i === pcSuggestionIndex),
+    );
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    pcSuggestionIndex = (pcSuggestionIndex - 1 + items.length) % items.length;
+    Array.from(items).forEach((el, i) =>
+      el.classList.toggle("active", i === pcSuggestionIndex),
+    );
+  } else if (e.key === "Escape") {
+    privateChSuggestions.style.display = "none";
+    pcSuggestionIndex = -1;
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (
+    !privateChMembersInput.contains(e.target) &&
+    !privateChSuggestions.contains(e.target)
+  ) {
+    privateChSuggestions.style.display = "none";
+  }
+});
+
+// Rename channel
+function openRenameChannel() {
+  if (!channel.startsWith("private:")) return;
+  const renameInput = document.getElementById("rename-ch-input");
+  openModal(renamePrivateChModal, {
+    label: "Rename channel",
+    focus: renameInput,
+  });
+  document.getElementById("rename-ch-name-error").textContent = "";
+  renameInput.value = privateChannelMap[channel] || "";
+  renameInput.select();
+}
+
+function closeRenameChannel() {
+  closeModal(renamePrivateChModal);
+}
+
+document.getElementById("rename-ch-cancel-btn").onclick = closeRenameChannel;
+
+renamePrivateChModal.addEventListener("click", (e) => {
+  if (e.target === renamePrivateChModal) closeRenameChannel();
+});
+
+document.getElementById("rename-ch-submit-btn").onclick = async () => {
+  if (!channel.startsWith("private:")) return;
+  const channelId = channel.split(":")[1];
+  const name = document.getElementById("rename-ch-input").value.trim();
+  const renameError = document.getElementById("rename-ch-name-error");
+  renameError.textContent = "";
+  if (!name) return;
+  if (name.length > MAX_CHANNEL_NAME_LEN) {
+    renameError.textContent = `Channel name must be ${MAX_CHANNEL_NAME_LEN} characters or fewer (${name.length}/${MAX_CHANNEL_NAME_LEN}).`;
+    document.getElementById("rename-ch-input").focus();
+    return;
+  }
+
+  const resp = await fetch(`/private_channels/${channelId}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+
+  if (!resp.ok) {
+    showToast("Failed to rename channel: " + (await resp.text()));
+    return;
+  }
+
+  privateChannelMap[channel] = name;
+  document.getElementById("chan").innerText = "";
+  const nameBarText = document.getElementById("private-ch-name-bar-text");
+  if (nameBarText) nameBarText.textContent = name;
+  closeRenameChannel();
+  refreshPrivateChannels();
+};
+
+document.getElementById("rename-ch-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter")
+    document.getElementById("rename-ch-submit-btn").click();
+  if (e.key === "Escape") closeRenameChannel();
+});
+
+// Leaving is irreversible for an invite-only channel — without a member to
+// re-add you, there is no way back in. It gets a confirmation step, but an
+// in-place one: the native confirm() this replaced blocked the whole page and
+// looked nothing like the account-deletion confirm sitting a few lines above it
+// in the same dialog.
+function askLeaveChannel() {
+  if (!channel.startsWith("private:")) return;
+  const name = privateChannelMap[channel] || channel;
+  document.getElementById("leave-channel-prompt").textContent =
+    `Leave "${name}"? You'll need an invite from a member to rejoin.`;
+  document.getElementById("leave-channel-btn").style.display = "none";
+  document.getElementById("leave-channel-confirm").style.display = "block";
+  document.getElementById("leave-channel-cancel-btn").focus();
+}
+
+function cancelLeaveChannel() {
+  const confirmEl = document.getElementById("leave-channel-confirm");
+  if (confirmEl) confirmEl.style.display = "none";
+  const btn = document.getElementById("leave-channel-btn");
+  if (btn) btn.style.display = "";
+}
+
+async function leaveChannel() {
+  if (!channel.startsWith("private:")) return;
+  const channelId = channel.split(":")[1];
+
+  const resp = await fetch(`/private_channels/${channelId}/leave`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    showToast("Failed to leave channel: " + (await resp.text()));
+    return;
+  }
+
+  closeUsersModal();
+  delete privateChannelMap[channel];
+  delete privateChannelMembers[channel];
+  switchChannel("general");
+  refreshPrivateChannels();
+}
+
+addMemberInput.addEventListener("input", () => {
+  if (!globalThis.usersLoaded) return;
+  const q = addMemberInput.value.trim().toLowerCase();
+  addMemberSuggIndex = -1;
+  if (!q) {
+    addMemberSuggestions.style.display = "none";
+    return;
+  }
+  const matches = globalThis.allUsers
+    .map((u) => ({ user: u, result: fuzzySearch(q, u) }))
+    .filter(({ result }) => result !== null)
+    .sort((a, b) => b.result.score - a.result.score);
+  addMemberCurrentSuggestions = matches.map((m) => m.user);
+  if (!addMemberCurrentSuggestions.length) {
+    addMemberSuggestions.style.display = "none";
+    return;
+  }
+  addMemberSuggestions.innerHTML = "";
+  matches.forEach(({ user, result }, idx) => {
+    const div = document.createElement("div");
+    div.className = "autocomplete-suggestion";
+    div.style.display = "flex";
+    div.style.alignItems = "center";
+    div.style.gap = "6px";
+    const dot = document.createElement("span");
+    dot.className = "presence-inline";
+    setPresence(dot, presenceMapCache[user] || "offline");
+    const label = document.createElement("span");
+    label.innerHTML = highlightFuzzyMatch(user, result.indices);
+    div.appendChild(dot);
+    div.appendChild(label);
+    div.onclick = () => selectAddMemberSuggestion(idx);
+    addMemberSuggestions.appendChild(div);
+  });
+  addMemberSuggestions.style.display = "block";
+});
+
+function selectAddMemberSuggestion(idx) {
+  addMemberInput.value = addMemberCurrentSuggestions[idx];
+  addMemberSuggestions.style.display = "none";
+  addMemberSuggIndex = -1;
+  addMemberInput.focus();
+}
+
+addMemberInput.addEventListener("keydown", (e) => {
+  const items = addMemberSuggestions.children;
+  const visible = addMemberSuggestions.style.display === "block";
+  if (e.key === "Tab" && visible && items.length) {
+    e.preventDefault();
+    selectAddMemberSuggestion(Math.max(addMemberSuggIndex, 0));
+    return;
+  }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (visible && items.length) {
+      selectAddMemberSuggestion(Math.max(addMemberSuggIndex, 0));
+      return;
+    }
+    document.getElementById("add-member-submit-btn").click();
+    return;
+  }
+  if (!visible) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    addMemberSuggIndex = (addMemberSuggIndex + 1) % items.length;
+    Array.from(items).forEach((el, i) =>
+      el.classList.toggle("active", i === addMemberSuggIndex),
+    );
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    addMemberSuggIndex = (addMemberSuggIndex - 1 + items.length) % items.length;
+    Array.from(items).forEach((el, i) =>
+      el.classList.toggle("active", i === addMemberSuggIndex),
+    );
+  } else if (e.key === "Escape") {
+    addMemberSuggestions.style.display = "none";
+    addMemberSuggIndex = -1;
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (
+    !addMemberInput.contains(e.target) &&
+    !addMemberSuggestions.contains(e.target)
+  ) {
+    addMemberSuggestions.style.display = "none";
+  }
+});
+
+document.getElementById("add-member-submit-btn").onclick = async () => {
+  if (!channel.startsWith("private:")) return;
+  const channelId = channel.split(":")[1];
+  const username = addMemberInput.value.trim();
+  if (!username) {
+    addMemberInput.focus();
+    return;
+  }
+
+  const resp = await fetch(`/private_channels/${channelId}/add_member`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username }),
+  });
+
+  if (!resp.ok) {
+    const msg = await resp.text();
+    showToast("Failed to add member: " + msg);
+    return;
+  }
+
+  addMemberInput.value = "";
+  renderMembersList();
+  updateMembersCount();
+};

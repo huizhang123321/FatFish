@@ -1,0 +1,86 @@
+# Ignore anything generated, local to this machine, or private to a user.
+#
+# The rule that matters most: the application's database, uploads, avatars, keys
+# and audit log must never be committed -- they hold real accounts and real
+# messages. As a desktop build that data lives in %APPDATA%\FatFish, but a source
+# checkout writes it next to the sources, so both shapes are excluded below.
+
+# ── Python ───────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+packaging/build/
+packaging/dist/
+
+# ── Local application data (accounts, messages, uploads, keys) ───────────────
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+secret.key
+*.pem
+audit.log
+audit.log.rotated_at
+/minimost/auth.db
+/minimost/presence.db
+/minimost/users/
+/minimost/uploads/
+/minimost/avatars/
+/minimost/stickers/
+
+# ── Verification scratch ────────────────────────────────────────────────────
+# run_tests_local.py and the verify_*.py scripts build throwaway databases here.
+.test-scratch/
+.test-scratch-run/
+.pytest-*/
+.verify*/
+.packtest/
+.devdata/
+.render-smoke/
+.verify-registry/
+.asar-stage/
+.upgrade-backup/
+.setuptemp/
+upgrade-test/
+/insttest*/
+/cmpfresh/
+.acl-recovery/
+
+# ── Node / desktop build ────────────────────────────────────────────────────
+node_modules/
+.npm-cache/
+.electron-cache/
+desktop/release/
+desktop/.render-smoke/
+desktop/node_modules/
+*.log
+
+# Generated desktop interface bundle. It is produced by `cd desktop && npm run
+# build`; keeping it out of version control means a stale bundle can never be
+# mistaken for source. The directory itself is kept by its README.
+/minimost/src/minimost/desktop_ui/assets/
+/minimost/src/minimost/desktop_ui/index.html
+/minimost/src/minimost/desktop_ui/logo.svg
+
+# Generated icons (packaging/make_assets.py draws them from code).
+desktop/build/icon.ico
+desktop/build/icon.png
+desktop/build/icon-256.png
+packaging/minimost-server.ico
+
+# ── Editors / OS ────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Leftover from repacking the Electron asar during a hot patch.
+.app.asar
+.app.asar.old

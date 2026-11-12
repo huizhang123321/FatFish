@@ -1,0 +1,33 @@
+{
+  "name": "fatfish-desktop",
+  "productName": "FatFish",
+  "version": "1.1.0",
+  "description": "FatFish desktop client for the MiniMost chat server (Windows, fully local)",
+  "author": "FatFish contributors",
+  "license": "MIT",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "electron": "electron .",
+    "pack": "electron-builder --win --x64 --dir --config electron-builder.yml",
+    "dist": "npm run build && npm run pack && powershell -ExecutionPolicy Bypass -File ../packaging/make-installer.ps1",
+    "selftest": "node scripts/backend-selftest.js",
+    "render-smoke": "tsc scripts/render-smoke.tsx src/global.d.ts --outDir .render-smoke --rootDir . --module commonjs --target es2022 --jsx react-jsx --esModuleInterop --skipLibCheck --moduleResolution node && node .render-smoke/scripts/render-smoke.js",
+    "ui-smoke": "electron scripts/ui-smoke.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.1",
+    "electron-builder": "^26.18.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.8"
+  }
+}

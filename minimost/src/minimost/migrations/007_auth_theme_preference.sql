@@ -1,0 +1,12 @@
+-- 007_auth_theme_preference.sql
+-- Remember the colour theme per account.
+--
+-- It used to live only in the browser's localStorage, which is keyed by origin --
+-- scheme, host AND port. The desktop shell picks a free port on start, so a launch
+-- that could not get 5000 got a different origin and the choice silently vanished.
+-- Storing it with the user's other settings makes it survive that, a different
+-- browser, or cleared storage.
+--
+-- NULL means "never chosen": the client then keeps whatever it has locally, and
+-- dark remains the default.
+ALTER TABLE user_settings ADD COLUMN theme TEXT;

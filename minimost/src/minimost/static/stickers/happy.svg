@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="开心">
+  <path d="M18 60c14-18 33-26 50-26 9 0 17 3 23 8l11-9-2 15 2 15-11-9c-6 5-14 8-23 8-17 0-36-8-50-26z" fill="#63d2ff"/>
+  <circle cx="62" cy="52" r="4" fill="#0b0e14"/>
+  <path d="M52 68q10 8 20 0" stroke="#0b0e14" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <circle cx="40" cy="64" r="5" fill="#ff8fa3" opacity=".5"/>
+</svg>

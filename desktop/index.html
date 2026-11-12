@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>FatFish</title>
+    <link rel="icon" type="image/svg+xml" href="./logo.svg" />
+    <script>
+      // Apply the saved theme before anything paints. The bundle would otherwise
+      // set it a moment later, and a light-theme user would watch the dark
+      // palette flash on every load. Kept tiny and dependency-free on purpose.
+      try {
+        if (localStorage.getItem("fatfish.theme") === "light") {
+          document.documentElement.dataset.theme = "light";
+        }
+      } catch (e) {
+        /* storage blocked: fall back to the dark default */
+      }
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #10131a;
+        color: #e8eaf0;
+        font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      }
+      /* The splash has to match the theme too, or the first frame flickers. */
+      html[data-theme="light"],
+      html[data-theme="light"] body {
+        background: #ffffff;
+        color: #12161c;
+      }
+      html[data-theme="light"] .boot-splash p {
+        color: #77828f;
+      }
+      #root {
+        height: 100%;
+      }
+      .boot-splash {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.9;
+      }
+      .boot-splash p {
+        margin: 0;
+        font-size: 13px;
+        letter-spacing: 0.08em;
+        color: #7d879c;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="boot-splash">
+        <svg viewBox="0 0 64 64" width="72" height="72" aria-hidden="true">
+          <path
+            d="M6 32c9-12 21-17 32-17 6 0 11 2 15 5l7-6-1 10 1 10-7-6c-4 3-9 5-15 5-11 0-23-5-32-17z"
+            fill="#4cc2ff"
+          />
+          <circle cx="44" cy="28" r="2.8" fill="#0b0e14" />
+        </svg>
+        <p>正在启动…</p>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

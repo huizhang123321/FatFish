@@ -1,0 +1,91 @@
+# electron-builder configuration for the FatFish desktop application.
+#
+# Two stages, because electron-builder's own NSIS target is not reliable here:
+#
+#   1. `npm run pack`   -- electron-builder produces release/win-unpacked/:
+#                          FatFish.exe + resources/app.asar + resources/server.
+#   2. `packaging/make-installer.ps1`
+#                       -- compiles packaging/fatfish-installer.nsi over that
+#                          directory into FatFish-Setup-<version>-x64.exe.
+#
+# Why not electron-builder's nsis target: that target compiles a throw-away
+# installer with BUILD_UNINSTALLER defined and *executes* it to obtain the
+# uninstaller binary, launching the child through builder-util's exec with an
+# environment that contains only __COMPAT_LAYER (see
+# app-builder-lib/out/vm/WineVm.js). The child writes the uninstaller and then
+# exits non-zero, which aborts the whole build. fatfish-installer.nsi instead
+# relies on standard NSIS behaviour -- WriteUninstaller at install time -- so no
+# helper process is executed while building.
+#
+# The packaged layout is:
+#   <install dir>/FatFish.exe                  Electron shell
+#   <install dir>/resources/app.asar           electron/main.js + preload.js
+#   <install dir>/resources/server/            the PyInstaller bundle
+#       minimost-server.exe
+#       minimost/templates, static, migrations, desktop_ui, settings.json
+#
+# The renderer is NOT packaged here: the Flask backend inside the PyInstaller
+# bundle serves it from /app/, and the window loads that same-origin URL. Keeping
+# one copy of the UI removes the class of bugs where a stale bundled copy and the
+# served copy disagree.
+
+appId: com.fatfish.desktop
+productName: FatFish
+copyright: Copyright © 2026 FatFish contributors
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the Electron shell itself goes into the asar. Node's dev dependencies and
+# the React sources stay out: the renderer ships inside the Python bundle.
+files:
+  - electron/**/*
+  - package.json
+  - "!**/*.map"
+  - "!**/*.md"
+
+# The frozen backend, next to resources/ rather than inside the asar (an asar
+# archive is not executable, and PyInstaller's bundle has to exist as real files
+# on disk anyway).
+extraResources:
+  - from: ../packaging/dist/minimost-server
+    to: server
+    filter:
+      - "**/*"
+
+asar: true
+
+win:
+  # `dir` only: the installer is compiled by packaging/make-installer.ps1.
+  target:
+    - target: dir
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: FatFish-Setup-${version}-${arch}.${ext}
+  # No code signing certificate is configured: this is a locally built app that is
+  # distributed by copying the installer, not by download. Windows SmartScreen
+  # warns on first run; see the deployment doc.
+  signAndEditExecutable: false
+
+nsis:
+  # Kept for reference and for environments where electron-builder's stub runs
+  # cleanly; it is not used by `npm run pack`/`npm run dist`. The equivalent
+  # behaviour is implemented in packaging/fatfish-installer.nsi, which installs
+  # per-user, lets the user choose the directory, and creates both shortcuts.
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 肥鱼聊天
+  uninstallDisplayName: 肥鱼聊天
+  language: "2052"
+  installerLanguages:
+    - zh_CN
+  deleteAppDataOnUninstall: false
+  # Previous installs upgrade in place instead of stacking up in Add/Remove.
+  # The user's data lives in %APPDATA%/FatFish and is never touched by the
+  # installer or uninstaller.

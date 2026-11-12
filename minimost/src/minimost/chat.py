@@ -1,0 +1,4615 @@
+"""
+minimost.chat
+=============
+
+Core messaging routes: sending, receiving, editing, deleting, reacting, and
+serving uploaded files.
+
+This is the largest module in MiniMost and contains all business logic for
+the chat interface, including:
+
+* **Channel management helpers** — resolving participants, validating access
+  for public channels, DMs, and private channels.
+* **Message CRUD** — sending, fetching (with polling support), editing, and
+  soft-deleting messages across every recipient's database simultaneously.
+* **Reactions** — toggle emoji reactions stored atomically in the shared
+  ``presence.db``.
+* **Read receipts** — mark messages as read and query who has read them.
+* **File serving** — authenticated delivery of image attachments.
+* **Search** — full-text ``LIKE`` search across a user's message history.
+* **Link previews** — delegate to :mod:`minimost.preview`.
+* **Private channels** — create invite-only channels, manage membership, and
+  rename channels.  Private channel state (membership, channel metadata) is
+  stored in the shared ``presence.db`` so every member sees the same view.
+  Private channels are identified throughout the app as ``"private:<id>"``
+  where ``<id>`` is the auto-increment primary key from the
+  ``private_channels`` table.
+
+Module-level attributes
+-----------------------
+chat_bp : flask.Blueprint
+    The Flask Blueprint that groups all chat-related routes.  Registered in
+    :func:`minimost.create_app`.
+
+ALLOWED_EXTENSIONS : set
+    File extensions accepted for image uploads:
+    ``{".jpg", ".jpeg", ".png", ".gif", ".webp"}``.
+
+UPLOAD_DIR : pathlib.Path
+    Absolute path to the ``uploads/`` directory where image attachments are
+    stored.  Created at import time if it does not exist.
+
+CHANNELS : list of str
+    Public channel names loaded from ``channels.json`` at startup.  Defaults
+    to ``["general"]`` if the file is absent or malformed.
+
+VALID_REACTIONS : set of str
+    Set of valid reaction emoji names, derived from the SVG filenames in
+    ``static/reactions/``.  Only names in this set are accepted by the
+    ``/react/<msg_id>`` endpoint.
+"""
+
+# From the python standard library
+from time import time
+import sqlite3
+import os
+import re
+import urllib.parse
+import uuid
+import json
+import math
+import secrets
+from pathlib import Path
+from typing import List, Optional
+
+# From Flask
+from flask import (
+    abort,
+    request,
+    jsonify,
+    render_template,
+    send_from_directory,
+    session,
+    Blueprint,
+    current_app,
+)
+from werkzeug.utils import secure_filename as _secure_filename
+from werkzeug.security import check_password_hash
+
+# Local Imports
+from . import audit
+from . import common
+from . import presence
+from . import auth
+from . import preview as preview_mod
+from . import ratelimit
+from .paths import data_dir
+
+chat_bp = Blueprint("chat", __name__)
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+
+def _max_upload_size_bytes() -> int:
+    """Return the configured max upload size in bytes (default 25 MiB)."""
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+        value = data.get("max_upload_size_mb")
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value * 1024 * 1024)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return 25 * 1024 * 1024
+
+
+def _check_upload_sizes(files, max_bytes: int):
+    """Return an error tuple if any file exceeds *max_bytes*, else ``None``."""
+    for f in files:
+        if not hasattr(f, "filename") or not f.filename:
+            continue
+        f.stream.seek(0, 2)
+        size = f.stream.tell()
+        f.stream.seek(0)
+        if size > max_bytes:
+            mb = max_bytes // (1024 * 1024)
+            return f"file too large (max {mb} MB)", 413
+    return None
+
+
+def _max_avatar_size_bytes() -> int:
+    """Return the configured max avatar size in bytes (default 5 MiB)."""
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+        value = data.get("max_avatar_size_mb")
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value * 1024 * 1024)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return 5 * 1024 * 1024
+
+
+_WAL = "PRAGMA journal_mode=WAL"
+_SQL_AVATAR = "SELECT avatar_file FROM user_settings WHERE username = ?"
+_SQL_ENSURE_SETTINGS = "INSERT OR IGNORE INTO user_settings (username) VALUES (?)"
+# Fields the edit / delete / react routes all need to decide whether the caller
+# may act on a message and whether it is still actionable at all.
+_MSG_LOOKUP_SQL = (
+    "SELECT channel, sender, ts, filename, deleted FROM messages WHERE id = ?"
+)
+# Identifier prefix for private channels (``"private:<id>"``); see module docstring.
+PRIVATE_CHANNEL_PREFIX = "private:"
+# Reused JSON error body for missing-message responses.
+_NOT_FOUND = "not found"
+# Ceiling on how many messages one channel may have pinned at once. The pin list
+# is pushed in full to every open stream on the channel (see
+# minimost.events._CHANNEL_COLLECTORS), so an unbounded list would grow the
+# payload of every push without limit. It is also a usability floor: a hundred
+# pins is the same as none.
+MAX_PINS_PER_CHANNEL = 50
+# How much of a pinned message's text the panel needs. The full body can be
+# thousands of characters, and the list only ever renders one truncated line of
+# it, so the rest is pure weight in a payload that is re-pushed on every change.
+PIN_PREVIEW_CHARS = 300
+_INSERT_MSG_SQL = (
+    "INSERT INTO messages (channel, sender, content, content_type, ts)"
+    " VALUES (?, ?, ?, ?, ?)"
+)
+
+_HERE = Path(__file__).resolve().parent
+
+UPLOAD_DIR = data_dir() / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+AVATAR_DIR = data_dir() / "avatars"
+AVATAR_DIR.mkdir(exist_ok=True)
+
+# settings.json is bundled inside the package (src/minimost/) so it ships in
+# the wheel; _HERE is the package directory.
+_SETTINGS_FILE = _HERE / "settings.json"
+
+
+def _load_channels() -> List[str]:
+    """Load the list of public channels from ``settings.json``.
+
+    Reads and parses ``settings.json`` from the project root and returns the
+    value of the ``"channels"`` key.  Falls back to a single ``"general"``
+    channel if the file is absent, malformed, or missing the key.
+
+    :returns: Ordered list of public channel name strings.
+    :rtype: list of str
+    """
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+        channels = data.get("channels")
+        if isinstance(channels, list) and channels:
+            return channels
+    except (OSError, json.JSONDecodeError):
+        pass
+    return ["general"]
+
+
+CHANNELS = _load_channels()
+MAX_CHANNEL_NAME_LEN = 80
+# Upper bound on a single message body. Bounds per-message storage so a user
+# can't post a multi-megabyte body (up to MAX_CONTENT_LENGTH) that bloats the
+# shared message DB — and, where a size cap is configured, evicts other users'
+# history. Generous enough for long pastes/code blocks.
+MAX_MESSAGE_LEN = 10000
+
+# Matches an ``@username`` mention.  The negative lookbehind for word
+# characters, ``@`` and ``/`` prevents matching inside email addresses
+# (``foo@bar``) and URLs (``.../@handle``).  Username charset mirrors the
+# ``[A-Za-z0-9_-]`` rule enforced at signup (see auth._USERNAME_RE).
+_MENTION_RE = re.compile(r"(?<![\w@/])@([A-Za-z0-9_-]+)")
+
+# Reserved keyword: ``@everyone`` mentions the whole channel.  Stored as a
+# sentinel in the ``mentions`` column instead of expanding to the (possibly
+# large, possibly stale) member list.  Usernames can never collide with it
+# because ``@`` is not a legal username character.
+MENTION_EVERYONE = "@everyone"
+
+
+def extract_mentions(text: str, channel: str) -> List[str]:
+    """Return the channel members that are ``@``-mentioned in *text*.
+
+    Parses every ``@name`` token out of *text* and keeps only those that
+    resolve (case-insensitively) to an actual member of *channel*.  The
+    returned usernames use their canonical (stored) casing, in channel
+    membership order.  Returns ``[]`` when *text* is empty or contains no
+    valid mentions.
+
+    The reserved keyword ``@everyone`` mentions the whole channel; when it is
+    present the single-element list ``[MENTION_EVERYONE]`` is returned
+    regardless of any other tokens, since it already covers every member.
+
+    :param text: The raw message body.
+    :type text: str
+    :param channel: The channel the message is being posted to.
+    :type channel: str
+    :returns: Canonical usernames of mentioned channel members, or
+        ``[MENTION_EVERYONE]`` for a channel-wide mention.
+    :rtype: list of str
+    """
+    if not text:
+        return []
+    found = {name.lower() for name in _MENTION_RE.findall(text)}
+    if not found:
+        return []
+    if "everyone" in found:
+        return [MENTION_EVERYONE]
+    return [u for u in channel_users(channel) if u.lower() in found]
+
+
+def _mentions_json(text: str, channel: str):
+    """Return a JSON-encoded mention list for *text*, or ``None`` if empty."""
+    mentions = extract_mentions(text, channel)
+    return json.dumps(mentions) if mentions else None
+
+
+def _dedupe(names: List[str]) -> List[str]:
+    """Return *names* with duplicates removed, preserving first-seen order."""
+    seen = set()
+    result = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
+
+def _canonical_username(name: str) -> Optional[str]:
+    """Return the stored casing of *name*, or ``None`` if no such account exists.
+
+    Account names are unique case-insensitively (signup rejects a name that
+    collides with an existing one under ``COLLATE NOCASE``), but every
+    membership and authorisation check compares them exactly. Anything that
+    accepts a username from a client therefore has to resolve it back to the
+    casing the account actually has, or it stores a member nobody can match.
+    """
+    lowered = (name or "").lower()
+    for existing in all_users():
+        if existing.lower() == lowered:
+            return existing
+    return None
+
+
+def _opt_float(value):
+    """Parse *value* as a float, returning ``None`` for empty/invalid input.
+
+    Used to coerce optional numeric query-string parameters (e.g. the search
+    date bounds) without raising on absent or malformed values.
+
+    :param value: The raw query-string value, or ``None``.
+    :returns: The parsed float, or ``None`` if *value* is missing or invalid.
+    :rtype: float or None
+    """
+    if not value:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_private_db():
+    """Return an open WAL connection to the shared ``presence.db``.
+
+    Configures the connection with WAL journal mode and ``sqlite3.Row``
+    row factory so columns are accessible by name.  The caller is
+    responsible for closing the returned connection.
+
+    :returns: An open SQLite connection to ``presence.db``.
+    :rtype: sqlite3.Connection
+    """
+    pdb = sqlite3.connect(presence.PRESENCE_DB)
+    pdb.execute(_WAL)
+    pdb.row_factory = sqlite3.Row
+    return pdb
+
+
+def get_private_channel_members(channel_id: int) -> List[str]:
+    """Return the list of usernames that are members of a private channel.
+
+    Queries the ``private_channel_members`` table in ``presence.db`` for
+    all rows matching *channel_id* and returns the corresponding usernames.
+    Returns an empty list if the channel does not exist or has no members.
+
+    :param channel_id: The integer primary key of the private channel.
+    :type channel_id: int
+    :returns: Usernames of all current members, in insertion order.
+    :rtype: list of str
+    """
+    pdb = _get_private_db()
+    rows = pdb.execute(
+        "SELECT username FROM private_channel_members WHERE channel_id = ?",
+        (channel_id,),
+    ).fetchall()
+    pdb.close()
+    return [r[0] for r in rows]
+
+
+# ── Groups (private channels with a kind and member roles) ──────────────────
+#
+# A "group" is a private channel whose ``kind`` column is ``'group'``; legacy
+# private channels keep ``kind = 'channel'`` and their original, role-free
+# behaviour. Both live in the same ``private_channels`` /
+# ``private_channel_members`` tables and are addressed by the same
+# ``private:<id>`` identifier, so messages, uploads, read state and SSE all flow
+# through the existing paths untouched.
+
+KIND_CHANNEL = "channel"
+KIND_GROUP = "group"
+
+ROLE_OWNER = "owner"
+ROLE_ADMIN = "admin"
+ROLE_MEMBER = "member"
+
+# Rank order used to compare roles: an action requiring a rank is permitted for
+# that rank or any higher one.
+_ROLE_RANK = {ROLE_MEMBER: 1, ROLE_ADMIN: 2, ROLE_OWNER: 3}
+
+# Ceiling on a group's initial membership, so a single create request cannot
+# enrol an unbounded number of rows.
+MAX_GROUP_MEMBERS = 100
+
+
+def _group_invite_admin_only() -> bool:
+    """Return whether only owner/admin may invite into a group.
+
+    Read from the ``group_invite_admin_only`` key in ``settings.json`` on each
+    call so an operator's edit takes effect without a restart (matching the
+    other settings readers in this module). Defaults to ``False``: like upstream
+    private channels, any member may invite.
+
+    This is the *global* floor. A group also has its own
+    ``invite_admin_only`` column; ``_invite_admin_only_for`` combines the two.
+    """
+    try:
+        data = json.loads(_SETTINGS_FILE.read_text())
+        return data.get("group_invite_admin_only") is True
+    except (OSError, json.JSONDecodeError):
+        return False
+
+
+def _invite_admin_only_for(channel_id: int) -> bool:
+    """Whether *this* group restricts inviting to owner/admin.
+
+    True when either the group asked for it or the global setting does, so an
+    operator can still tighten every group at once without touching each one.
+    """
+    if _group_invite_admin_only():
+        return True
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT COALESCE(invite_admin_only, 0) FROM private_channels WHERE id = ?",
+            (channel_id,),
+        ).fetchone()
+    finally:
+        pdb.close()
+    return bool(row and row[0])
+
+
+def _generate_group_no(pdb) -> str:
+    """Allocate an unused 8-digit group number.
+
+    Random rather than derived from the row id: the number is meant to be shared
+    ("加群号 12345678"), and a number that is just ``10000000 + id`` would let
+    anyone enumerate groups. Collisions are retried; the unique index is the
+    backstop if two writers race.
+    """
+    for _ in range(20):
+        candidate = str(secrets.randbelow(90_000_000) + 10_000_000)
+        exists = pdb.execute(
+            "SELECT 1 FROM private_channels WHERE group_no = ?", (candidate,)
+        ).fetchone()
+        if not exists:
+            return candidate
+    # Astronomically unlikely (90 million numbers, 20 draws); fall back to a
+    # time-derived value rather than failing the request.
+    return str(10_000_000 + int(time()) % 90_000_000)
+
+
+def _ensure_group_no(channel_id: int, pdb=None) -> str:
+    """Return a group's number, assigning one on first use.
+
+    Old rows predate the column, so the number is created lazily instead of by a
+    data migration. Idempotent: a second call returns the stored value.
+    """
+    own = pdb is None
+    if own:
+        pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT group_no, COALESCE(kind, ?) FROM private_channels WHERE id = ?",
+            (KIND_CHANNEL, channel_id),
+        ).fetchone()
+        if not row:
+            return ""
+        group_no, kind = row
+        if group_no:
+            return group_no
+        if kind != KIND_GROUP:
+            return ""
+        group_no = _generate_group_no(pdb)
+        pdb.execute(
+            "UPDATE private_channels SET group_no = ? WHERE id = ?", (group_no, channel_id)
+        )
+        pdb.commit()
+        return group_no
+    finally:
+        if own:
+            pdb.close()
+
+
+def _channel_kind(channel_id: int):
+    """Return the ``kind`` of a private channel, or ``None`` if it does not exist.
+
+    :rtype: str or None
+    """
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT COALESCE(kind, ?) FROM private_channels WHERE id = ?",
+            (KIND_CHANNEL, channel_id),
+        ).fetchone()
+    finally:
+        pdb.close()
+    return row[0] if row else None
+
+
+def _member_role(channel_id: int, username: str):
+    """Return *username*'s role in the channel, or ``None`` if not a member.
+
+    A row written before the ``role`` column existed (or with a NULL role) is
+    treated as ``member``.
+
+    :rtype: str or None
+    """
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT COALESCE(role, ?) FROM private_channel_members"
+            " WHERE channel_id = ? AND username = ?",
+            (ROLE_MEMBER, channel_id, username),
+        ).fetchone()
+    finally:
+        pdb.close()
+    return row[0] if row else None
+
+
+def _manage_gate(channel_id, user, need_admin=False, need_owner=False):
+    """Authorise *user* for a private-channel/group management action.
+
+    Membership is always required. Beyond that, a **group** enforces the
+    owner/admin/member matrix, while a legacy private channel (``kind =
+    'channel'``) stays role-free — any member may manage it, exactly as before
+    roles existed. That asymmetry is what keeps this change non-breaking for
+    existing channels and the old frontend.
+
+    :returns: ``(role, error)``. *error* is ``None`` when permitted, otherwise a
+        ``(body, status)`` tuple the caller should return directly.
+    :rtype: tuple
+    """
+    kind = _channel_kind(channel_id)
+    if kind is None:
+        return None, ("channel not found", 404)
+
+    role = _member_role(channel_id, user)
+    if role is None:
+        return None, ("forbidden", 403)
+
+    if kind != KIND_GROUP:
+        return role, None
+
+    rank = _ROLE_RANK.get(role, _ROLE_RANK[ROLE_MEMBER])
+    if need_owner and rank < _ROLE_RANK[ROLE_OWNER]:
+        return role, ("owner required", 403)
+    if need_admin and rank < _ROLE_RANK[ROLE_ADMIN]:
+        return role, ("admin required", 403)
+    return role, None
+
+
+def _post_system_message(channel_id, content):
+    """Insert a system message into a private channel/group.
+
+    Group membership changes are announced in-channel the same way upstream
+    announces renames and additions, so participants see why the roster changed.
+    """
+    ch = f"{PRIVATE_CHANNEL_PREFIX}{channel_id}"
+    db = get_db()
+    try:
+        db.execute(_INSERT_MSG_SQL, (ch, "system", content, "system", time()))
+        db.commit()
+    finally:
+        db.close()
+
+
+def _group_exists_as_group(channel_id) -> bool:
+    """True when *channel_id* is an existing private channel of kind 'group'."""
+    return _channel_kind(channel_id) == KIND_GROUP
+
+
+def get_db(username: Optional[str] = None):
+    """Open and return a connection to the shared message database.
+
+    The connection is configured with:
+
+    * **WAL journal mode** — readers (the 500 ms pollers) never block the single
+      writer, so many users can read concurrently while one message is written.
+    * **``row_factory = sqlite3.Row``** — rows can be accessed by column name
+      (e.g. ``row["sender"]``) in addition to integer index.
+
+    The caller is responsible for closing the returned connection.
+
+    :param username: Ignored. Retained so existing call sites that passed a
+        username (from the former per-user-database model) keep working.
+    :returns: An open SQLite database connection to the shared database.
+    :rtype: sqlite3.Connection
+
+    Example::
+
+        db = get_db()
+        rows = db.execute("SELECT * FROM messages WHERE channel = ?", ("general",)).fetchall()
+        db.close()
+    """
+    db = sqlite3.connect(str(common.shared_db_path()))
+    db.execute(_WAL)
+    db.row_factory = sqlite3.Row
+    return db
+
+
+def _advance_read(db, user: str, channel: str, ts: float) -> None:
+    """Move *user*'s read watermark for *channel* forward to at least *ts*.
+
+    The watermark only ever advances — a stale concurrent write can't rewind it
+    — so unread counts and read receipts stay monotonic.
+    """
+    db.execute(
+        "INSERT INTO read_state (user, channel, last_read_ts) VALUES (?, ?, ?) "
+        "ON CONFLICT(user, channel) DO UPDATE SET "
+        "last_read_ts = MAX(last_read_ts, excluded.last_read_ts)",
+        (user, channel, ts),
+    )
+
+
+def _history_start(channel: str, user: str):
+    """Return the timestamp before which *user* may not see *channel*'s history.
+
+    Private-channel members added after creation get a ``history_start_ts`` so
+    they don't see the backlog. Returns ``None`` when there is no cutoff (public
+    channels, DMs, founding members).
+    """
+    if not channel.startswith(PRIVATE_CHANNEL_PREFIX):
+        return None
+    try:
+        channel_id = int(channel.split(":")[1])
+    except (ValueError, IndexError):
+        return None
+    pdb = _get_private_db()
+    row = pdb.execute(
+        "SELECT history_start_ts FROM private_channel_members "
+        "WHERE channel_id = ? AND username = ?",
+        (channel_id, user),
+    ).fetchone()
+    pdb.close()
+    return row["history_start_ts"] if row else None
+
+
+# SQL ``LIKE`` treats ``_`` as a single-character wildcard and ``%`` as a
+# multi-character one.  Usernames may contain ``_`` (see auth._USERNAME_RE), so
+# interpolating one straight into a DM-channel ``LIKE`` pattern lets a user
+# named ``a_ice`` match ``dm:alice:...`` and read conversations they are not a
+# party to.  Every pattern built from a username must be escaped with this and
+# paired with an ``ESCAPE '\'`` clause.
+_LIKE_ESCAPE = "\\"
+
+
+def _like_literal(value: str) -> str:
+    """Escape ``LIKE`` metacharacters so *value* only matches itself.
+
+    The backslash is escaped first so it can serve as the escape character for
+    the wildcards that follow.
+
+    :param value: Raw text to embed in a ``LIKE`` pattern (e.g. a username).
+    :returns: The same text with ``\\``, ``%`` and ``_`` backslash-escaped.
+    :rtype: str
+    """
+    return (
+        value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+
+
+def _search_access(user):
+    """Build the channel-access filter for a shared-database search.
+
+    Returns ``(clause, params, history_starts)`` where *clause* restricts a
+    ``messages m`` query to channels *user* may read — public channels, the
+    private channels they belong to, and their own DMs — and *history_starts*
+    maps a private channel to the timestamp before which the user must not see
+    its backlog (so late joiners can't search history from before they joined).
+    """
+    allowed = list(CHANNELS)
+    history_starts = {}
+    pdb = _get_private_db()
+    rows = pdb.execute(
+        "SELECT channel_id, history_start_ts FROM private_channel_members "
+        "WHERE username = ?",
+        (user,),
+    ).fetchall()
+    pdb.close()
+    for r in rows:
+        ch = f"{PRIVATE_CHANNEL_PREFIX}{r['channel_id']}"
+        allowed.append(ch)
+        if r["history_start_ts"] is not None:
+            history_starts[ch] = r["history_start_ts"]
+
+    placeholders = ",".join("?" * len(allowed)) if allowed else "NULL"
+    clause = (
+        f"(m.channel IN ({placeholders})"
+        " OR m.channel LIKE 'dm:' || ? || ':%' ESCAPE '\\'"
+        " OR m.channel LIKE 'dm:%:' || ? ESCAPE '\\'"
+        " OR m.channel LIKE 'dm:%:' || ? || ':%' ESCAPE '\\')"
+    )
+    like_user = _like_literal(user)
+    return clause, [*allowed, like_user, like_user, like_user], history_starts
+
+
+def all_users() -> List[str]:
+    """Return a list of every registered username.
+
+    Queries the shared ``auth.db`` database and returns every username in
+    the ``users`` table.  The order is undefined (SQLite row insertion order).
+
+    This is used to determine the recipient list when sending a message to a
+    public channel — every registered user receives a copy of every public
+    channel message.
+
+    :returns: List of usernames for all registered accounts.
+    :rtype: list of str
+    """
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    rows = db.execute("SELECT username FROM users").fetchall()
+    db.close()
+    return [r[0] for r in rows]
+
+
+def normalize_dm(users: List[str]) -> str:
+    """Return the canonical DM channel identifier for a set of participants.
+
+    DM channels are identified by the string ``"dm:"`` followed by the
+    sorted, colon-separated participant usernames.  Sorting ensures that
+    ``normalize_dm(["bob", "alice"])`` and ``normalize_dm(["alice", "bob"])``
+    both return the same string, preventing duplicate conversations from
+    being created with different orderings.
+
+    :param users: List of usernames that are participants in the DM.
+        Duplicates are removed before sorting.
+    :type users: list of str
+    :returns: Canonical DM channel string, e.g. ``"dm:alice:bob"``.
+    :rtype: str
+
+    Example::
+
+        normalize_dm(["charlie", "alice"])
+        # returns "dm:alice:charlie"
+    """
+    users = sorted(set(users))
+    return "dm:" + ":".join(users)
+
+
+def channel_users(channel: str) -> List[str]:
+    """Return the list of users who should receive messages on a channel.
+
+    * For **DM channels** (``"dm:user1:user2:..."``): the participants are
+      parsed directly from the channel string.
+    * For **private channels** (``"private:<id>"``): the member list is
+      fetched from the ``private_channel_members`` table in ``presence.db``
+      via :func:`get_private_channel_members`.  Returns ``[]`` if the
+      channel ID is invalid.
+    * For **public channels**: every registered user is a recipient, so
+      :func:`all_users` is called.
+
+    This list is used by the send, edit, delete, and react routes to
+    determine which per-user databases must be updated.
+
+    :param channel: The channel name, DM identifier, or private channel
+        identifier (``"private:<id>"``).
+    :type channel: str
+    :returns: List of usernames that are members of *channel*.
+    :rtype: list of str
+
+    Example::
+
+        channel_users("dm:alice:bob")     # ["alice", "bob"]
+        channel_users("private:3")        # members of private channel 3
+        channel_users("general")          # all registered users
+    """
+    if channel.startswith("dm:"):
+        return channel.split(":")[1:]
+    if channel.startswith(PRIVATE_CHANNEL_PREFIX):
+        try:
+            return get_private_channel_members(int(channel.split(":")[1]))
+        except (ValueError, IndexError):
+            return []
+    return all_users()
+
+
+def unknown_dm_participants(channel: str) -> List[str]:
+    """Return the participants of DM *channel* that have no account.
+
+    A DM channel is addressed by name, not created through any endpoint, so
+    ``is_valid_channel`` only asks whether the caller is one of the participants
+    — which is true of ``dm:ghost:alice`` just as much as ``dm:bob:alice``. A
+    name that was mistyped, or merely mis-cased ("Bob" for the account "bob"),
+    therefore opened a conversation that looked completely normal and that
+    nobody was on the other end of: every message posted to it went nowhere,
+    with no error and no way to tell.
+
+    Checked when posting rather than inside :func:`is_valid_channel`, which runs
+    on every read of every channel and would gain an ``auth.db`` lookup for it.
+
+    :param channel: A ``dm:`` channel identifier.
+    :returns: The participant names with no matching account, in channel order.
+    :rtype: list of str
+    """
+    if not channel.startswith("dm:"):
+        return []
+    registered = set(all_users())
+    return [u for u in channel.split(":")[1:] if u not in registered]
+
+
+def is_valid_channel(channel: str, user: str) -> bool:
+    """Return ``True`` only if *user* is permitted to access *channel*.
+
+    Three access rules apply:
+
+    * **DM channels** — the channel string must have at least two
+      participants (``len(parts) >= 3``) and *user* must be one of them.
+    * **Private channels** — *user* must appear in the
+      ``private_channel_members`` table for the given channel ID (looked up
+      via :func:`get_private_channel_members`).  Returns ``False`` if the
+      ID is malformed or the channel does not exist.
+    * **Public channels** — *channel* must appear in the :data:`CHANNELS`
+      list loaded from ``channels.json``.
+
+    This function is called by the :func:`send` route before writing any
+    data, and is the primary authorization check for channel access.
+
+    :param channel: The channel name, DM identifier, or private channel
+        identifier (``"private:<id>"``).
+    :type channel: str
+    :param user: The username attempting to access the channel.
+    :type user: str
+    :returns: ``True`` if access is permitted, ``False`` otherwise.
+    :rtype: bool
+
+    Example::
+
+        is_valid_channel("dm:alice:bob", "alice")    # True
+        is_valid_channel("dm:alice:bob", "charlie")  # False
+        is_valid_channel("private:3", "alice")       # True if alice is a member
+        is_valid_channel("general", "alice")         # True (if "general" in CHANNELS)
+        is_valid_channel("secret", "alice")          # False (not in CHANNELS)
+    """
+    if channel.startswith("dm:"):
+        parts = channel.split(":")
+        return len(parts) >= 3 and user in parts[1:]
+    if channel.startswith(PRIVATE_CHANNEL_PREFIX):
+        try:
+            return user in get_private_channel_members(int(channel.split(":")[1]))
+        except (ValueError, IndexError):
+            return False
+    return channel in CHANNELS
+
+
+@chat_bp.route("/channels", methods=["GET"])
+@auth.login_required
+def channels():
+    """Return the list of public channel names.
+
+    Route: ``GET /channels``
+
+    Requires authentication.  Returns the :data:`CHANNELS` list that was
+    loaded from ``channels.json`` at application startup.  The client uses
+    this list to build the channel sidebar.
+
+    :returns: JSON array of channel name strings,
+        e.g. ``["general", "software", "off-topic"]``.
+    :rtype: flask.Response (application/json)
+    """
+    return jsonify(CHANNELS)
+
+
+@chat_bp.route("/channel_unreads", methods=["GET"])
+@auth.login_required
+def channel_unreads():
+    """Return unread message counts for every public channel.
+
+    Route: ``GET /channel_unreads``
+
+    Requires authentication.  For each public channel, counts messages not
+    sent by the user (``sender != user``) and not deleted (``deleted = 0``)
+    whose ``ts`` is newer than the user's per-channel read watermark
+    (``read_state.last_read_ts``).
+
+    All channels in :data:`CHANNELS` are included in the response — those
+    with no unread messages are returned with a count of ``0``.
+
+    :returns: JSON object mapping each public channel name to its unread
+        count, e.g. ``{"general": 3, "software": 0, "off-topic": 1}``.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    db = get_db()
+    # One statement per channel, with the read watermark as a scalar subquery
+    # rather than a joined column.
+    #
+    # The previous form was a single LEFT JOIN ... GROUP BY over every channel
+    # at once, which reads better but cannot use idx_messages_channel_ts beyond
+    # its leading column: `ts > r.last_read_ts` compares against a value the
+    # join produces, so SQLite has to visit every message row in each channel
+    # and filter afterwards. Feeding the watermark in as a subquery makes it a
+    # constant at plan time, so the index bounds `ts` too and each channel
+    # becomes a range scan over just its unread tail — the thing being counted.
+    # On a channel with 40k messages that is ~40ms versus ~0.15ms, and this runs
+    # from the /events collector for every connected client.
+    sql = (
+        "SELECT COUNT(*) FROM messages "
+        "WHERE channel = ? "
+        "  AND ts > COALESCE("
+        "        (SELECT last_read_ts FROM read_state WHERE user = ? AND channel = ?), 0) "
+        "  AND sender != ? AND deleted = 0"
+    )
+    result = {}
+    for ch in CHANNELS:
+        result[ch] = db.execute(sql, (ch, user, ch, user)).fetchone()[0]
+    db.close()
+    return jsonify(result)
+
+
+@chat_bp.route("/mentions", methods=["GET"])
+@auth.login_required
+def mentions():
+    """Return every unread message that ``@``-mentions the current user.
+
+    Route: ``GET /mentions``
+
+    Requires authentication.  Aggregates, across every channel the user may
+    read, the messages that mention them and that they have not yet read.  A
+    message counts as a mention if its ``mentions`` column (a JSON array set at
+    send time by :func:`extract_mentions`) contains the user's canonical
+    username, or the :data:`MENTION_EVERYONE` sentinel.  "Unread" is derived
+    from the per-``(user, channel)`` ``read_state`` watermark, so a mention
+    disappears from this list as soon as the user reads its channel — viewing
+    this list itself does not mark anything read.
+
+    The channel-access scope reuses :func:`_search_access`, and private-channel
+    late-joiners are bounded by ``history_start_ts`` exactly as
+    :func:`search_messages` does, so a user never sees mentions in channels they
+    cannot access or from before they joined.
+
+    :returns: JSON array of ``{id, channel, sender, content, filename, ts}``
+        objects, newest first.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    access_clause, access_params, history_starts = _search_access(user)
+
+    db = get_db()
+    rows = db.execute(
+        "SELECT m.id, m.channel, m.sender, m.content, m.filename, m.ts, m.mentions "
+        "FROM messages m "
+        "LEFT JOIN read_state r ON r.user = ? AND r.channel = m.channel "
+        "WHERE m.mentions IS NOT NULL "
+        "AND m.deleted = 0 "
+        "AND m.sender != ? "
+        "AND m.ts > COALESCE(r.last_read_ts, 0) "
+        f"AND {access_clause} "  # nosec B608 — access_clause is a constant template
+        "ORDER BY m.ts DESC",
+        (user, user, *access_params),
+    ).fetchall()
+    db.close()
+
+    result = []
+    for r in rows:
+        try:
+            mention_list = json.loads(r["mentions"])
+        except (TypeError, ValueError):
+            continue
+        if user not in mention_list and MENTION_EVERYONE not in mention_list:
+            continue
+        hs = history_starts.get(r["channel"])
+        if hs is not None and r["ts"] < hs:
+            continue
+        result.append(
+            {
+                "id": r["id"],
+                "channel": r["channel"],
+                "sender": r["sender"],
+                "content": r["content"],
+                "filename": r["filename"],
+                "ts": r["ts"],
+            }
+        )
+
+    return jsonify(result)
+
+
+@chat_bp.route("/unread_count", methods=["GET"])
+@auth.login_required
+def unread_count():
+    """Return the total number of unread direct messages for the current user.
+
+    Route: ``GET /unread_count``
+
+    Requires authentication.  Counts all unread (``read = 0``) messages in DM
+    channels (``channel LIKE 'dm:%'``) where the current user is a participant
+    and the message was sent by someone else.
+
+    The three ``LIKE`` patterns handle the three positions a username can
+    occupy in a DM channel string:
+
+    * ``dm:<user>:<others>`` — user is the first participant.
+    * ``dm:<others>:<user>`` — user is the last participant.
+    * ``dm:<others>:<user>:<more>`` — user is a middle participant (group DM).
+
+    This count is displayed as a badge on the "DMs" section of the sidebar and
+    drives the browser tab title badge.
+
+    :returns: JSON object ``{"count": N}`` where *N* is the total unread DM
+        message count.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    db = get_db()
+
+    # The DM prefix is matched as a range rather than ``channel LIKE 'dm:%'``.
+    # SQLite's LIKE is case-insensitive for ASCII by default, so it cannot use
+    # the BINARY-collated idx_messages_channel_ts and the planner falls back to
+    # scanning every message row — on a busy server this query runs from the
+    # /events collector for every connected client. ``>= 'dm:' AND < 'dm;'``
+    # (';' is the byte after ':') is an index range SEARCH instead, and matches
+    # exactly the channels dm_channel_name() can build, since every other DM
+    # check in this codebase is a case-sensitive startswith("dm:").
+    row = db.execute(
+        """
+        SELECT COUNT(*) AS unread
+        FROM messages m
+        LEFT JOIN read_state r ON r.user = ? AND r.channel = m.channel
+        WHERE m.channel >= 'dm:' AND m.channel < 'dm;'
+          AND m.sender != ?
+          AND m.deleted = 0
+          AND m.ts > COALESCE(r.last_read_ts, 0)
+          AND (
+                m.channel LIKE 'dm:' || ? || ':%' ESCAPE '\\'
+             OR m.channel LIKE 'dm:%:' || ? ESCAPE '\\'
+             OR m.channel LIKE 'dm:%:' || ? || ':%' ESCAPE '\\'
+          )
+    """,
+        (user, user, *([_like_literal(user)] * 3)),
+    ).fetchone()
+
+    count = row["unread"]
+    db.close()
+    return {"count": count}
+
+
+@chat_bp.route("/dms", methods=["GET"])
+@auth.login_required
+def dms():
+    """Return a summary of all DM conversations involving the current user.
+
+    Route: ``GET /dms``
+
+    Requires authentication.  Queries the current user's database for all DM
+    channels, returning them sorted by most-recent message timestamp
+    (``last_ts DESC``) so the sidebar list reflects activity order.
+
+    For each conversation, the response includes:
+
+    * ``channel`` — the canonical DM channel identifier (e.g.
+      ``"dm:alice:bob"``).
+    * ``users`` — list of the *other* participants (the current user is
+      excluded so the client can display their names).
+    * ``unread`` — count of unread messages from other users in this
+      conversation.
+
+    :returns: JSON array of conversation objects, each with keys ``channel``,
+        ``users`` (list of str), and ``unread`` (int), ordered by most
+        recent activity descending.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    db = get_db()
+
+    # Range rather than LIKE on the dm: prefix — see unread_count() for why.
+    rows = db.execute(
+        """
+        SELECT
+            m.channel,
+            MAX(m.ts) AS last_ts,
+            COALESCE(SUM(
+                CASE
+                    WHEN m.sender != ? AND m.deleted = 0
+                         AND m.ts > COALESCE(rs.last_read_ts, 0)
+                    THEN 1 ELSE 0
+                END
+            ), 0) AS unread
+        FROM messages m
+        LEFT JOIN dm_hidden dh ON dh.user = ? AND dh.channel = m.channel
+        LEFT JOIN read_state rs ON rs.user = ? AND rs.channel = m.channel
+        WHERE m.channel >= 'dm:' AND m.channel < 'dm;'
+          AND (
+                m.channel LIKE 'dm:' || ? || ':%' ESCAPE '\\'
+             OR m.channel LIKE 'dm:%:' || ? ESCAPE '\\'
+             OR m.channel LIKE 'dm:%:' || ? || ':%' ESCAPE '\\'
+          )
+        GROUP BY m.channel
+        HAVING dh.hidden_ts IS NULL OR MAX(m.ts) > dh.hidden_ts
+        ORDER BY last_ts DESC
+    """,
+        (user, user, user, *([_like_literal(user)] * 3)),
+    ).fetchall()
+
+    db.close()
+
+    result = []
+    for r in rows:
+        users = r["channel"].split(":")[1:]
+        others = [u for u in users if u != user]
+        result.append(
+            {
+                "channel": r["channel"],
+                "users": others,
+                "unread": int(r["unread"]),
+            }
+        )
+
+    return jsonify(result)
+
+
+@chat_bp.route("/dms/close", methods=["POST"])
+@auth.login_required
+def close_dm():
+    """Hide a DM conversation from the current user's sidebar.
+
+    Route: ``POST /dms/close``
+
+    JSON body: ``{"channel": str}``.  Records a ``hidden_ts`` timestamp for the
+    channel; the ``/dms`` endpoint will exclude this conversation until a new
+    message arrives after that timestamp.
+
+    :returns: ``"ok"`` on success.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+    dm_channel = (data.get("channel") or "").strip()
+    if not dm_channel.startswith("dm:"):
+        return "invalid channel", 400
+    if user not in dm_channel.split(":")[1:]:
+        return "forbidden", 403
+
+    db = get_db()
+    db.execute(
+        "INSERT OR REPLACE INTO dm_hidden (user, channel, hidden_ts) VALUES (?, ?, ?)",
+        (user, dm_channel, time()),
+    )
+    db.commit()
+    db.close()
+    return "ok"
+
+
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+@chat_bp.route("/user_colors", methods=["GET"])
+@auth.login_required
+def user_colors():
+    """Return custom name colors for all users who have set one.
+
+    Route: ``GET /user_colors``
+
+    :returns: JSON object mapping username to hex color string.
+    :rtype: flask.Response (application/json)
+    """
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    rows = db.execute(
+        "SELECT username, name_color FROM user_settings WHERE name_color IS NOT NULL"
+    ).fetchall()
+    db.close()
+    return jsonify({r[0]: r[1] for r in rows})
+
+
+@chat_bp.route("/settings", methods=["GET"])
+@auth.login_required
+def get_settings():
+    """Return the current user's settings.
+
+    Route: ``GET /settings``
+
+    :returns: JSON object with user settings keys.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    db.row_factory = sqlite3.Row
+    row = db.execute(
+        "SELECT name_color, bio, theme FROM user_settings WHERE username = ?", (user,)
+    ).fetchone()
+    db.close()
+    return jsonify(
+        {
+            "name_color": row["name_color"] if row else None,
+            "bio": row["bio"] if row else None,
+            # "light" / "dark", or null when the user has never chosen.
+            "theme": row["theme"] if row else None,
+        }
+    )
+
+
+@chat_bp.route("/theme", methods=["POST"])
+@auth.login_required
+def save_theme():
+    """Remember the caller's colour theme.
+
+    Route: ``POST /theme``
+
+    JSON body: ``{"theme": "light"}`` or ``{"theme": "dark"}``.
+
+    Separate from ``POST /settings`` on purpose: that route writes ``name_color``
+    and ``bio`` too, so reusing it for a theme toggle would blank the other fields
+    for any caller that sent only a theme.
+
+    Stored per account so the choice follows the person rather than one browser
+    origin -- the desktop shell picks a free port on start, and a different port is
+    a different localStorage, which is exactly how the setting used to get lost.
+
+    :returns: ``"ok"`` on success, ``400`` for an unknown theme.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+    theme = data.get("theme")
+    if theme not in ("light", "dark"):
+        return "invalid theme", 400
+
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    db.execute(_SQL_ENSURE_SETTINGS, (user,))
+    db.execute("UPDATE user_settings SET theme = ? WHERE username = ?", (theme, user))
+    db.commit()
+    db.close()
+    return "ok"
+
+
+@chat_bp.route("/settings", methods=["POST"])
+@auth.login_required
+def save_settings():
+    """Save the current user's settings.
+
+    Route: ``POST /settings``
+
+    JSON body: ``{"name_color": str | null}``.  Pass ``null`` to reset to the
+    default hash-derived color.
+
+    :returns: ``"ok"`` on success.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+
+    name_color = data.get("name_color")
+    if name_color is not None:
+        name_color = name_color.strip()
+        if not _COLOR_RE.match(name_color):
+            return "invalid color", 400
+
+    bio = data.get("bio")
+    if bio is not None:
+        bio = bio.strip()[:160]
+
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    # Upsert without ON CONFLICT (SQLite >= 3.24) so this works on the older
+    # SQLite that ships with some Python 3.6 systems.  INSERT OR IGNORE creates
+    # the row if absent; the UPDATE then sets only these columns, preserving any
+    # others (e.g. avatar_file).
+    db.execute(_SQL_ENSURE_SETTINGS, (user,))
+    db.execute(
+        "UPDATE user_settings SET name_color = ?, bio = ? WHERE username = ?",
+        (name_color, bio, user),
+    )
+    db.commit()
+    db.close()
+    return "ok"
+
+
+@chat_bp.route("/profile/<username>", methods=["GET"])
+@auth.login_required
+def get_profile(username):
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    db.row_factory = sqlite3.Row
+    row = db.execute(
+        "SELECT name_color, bio FROM user_settings WHERE username = ?", (username,)
+    ).fetchone()
+    db.close()
+    return jsonify(
+        {
+            "username": username,
+            "name_color": row["name_color"] if row else None,
+            "bio": row["bio"] if row else None,
+        }
+    )
+
+
+@chat_bp.route("/user_avatars", methods=["GET"])
+@auth.login_required
+def user_avatars():
+    """Return usernames of all users who have a custom avatar.
+
+    Route: ``GET /user_avatars``
+
+    :returns: JSON array of usernames.
+    :rtype: flask.Response (application/json)
+    """
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    rows = db.execute(
+        "SELECT username FROM user_settings WHERE avatar_file IS NOT NULL"
+    ).fetchall()
+    db.close()
+    return jsonify([r[0] for r in rows])
+
+
+@chat_bp.route("/avatar/<username>", methods=["GET"])
+@auth.login_required
+def get_avatar(username):
+    """Serve a user's avatar image.
+
+    Route: ``GET /avatar/<username>``
+
+    Returns 404 if the user has no custom avatar.
+
+    :returns: Image file response or 404.
+    :rtype: flask.Response
+    """
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    row = db.execute(_SQL_AVATAR, (username,)).fetchone()
+    db.close()
+    if not row or not row[0]:
+        return "", 404
+    return send_from_directory(AVATAR_DIR, row[0])
+
+
+@chat_bp.route("/avatar", methods=["POST"])
+@auth.login_required
+@ratelimit.rate_limit("avatar", by="user")
+def upload_avatar():
+    """Upload and store the current user's avatar.
+
+    Route: ``POST /avatar``
+
+    Expects a multipart file named ``avatar`` (pre-resized client-side).
+    Deletes the previous avatar file if one existed.
+
+    :returns: ``"ok"`` on success.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    f = request.files.get("avatar")
+    if not f or not f.filename:
+        return "no file", 400
+
+    f.stream.seek(0, 2)
+    size = f.stream.tell()
+    f.stream.seek(0)
+    max_bytes = _max_avatar_size_bytes()
+    if size > max_bytes:
+        mb = max_bytes // (1024 * 1024)
+        return f"file too large (max {mb} MB)", 413
+
+    filename = f"{uuid.uuid4().hex}.jpg"
+    f.save(AVATAR_DIR / filename)
+
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    row = db.execute(_SQL_AVATAR, (user,)).fetchone()
+    if row and row[0]:
+        try:
+            (AVATAR_DIR / row[0]).unlink()
+        except FileNotFoundError:
+            pass
+    db.execute(_SQL_ENSURE_SETTINGS, (user,))
+    db.execute(
+        "UPDATE user_settings SET avatar_file = ? WHERE username = ?",
+        (filename, user),
+    )
+    db.commit()
+    db.close()
+    return "ok"
+
+
+@chat_bp.route("/avatar", methods=["DELETE"])
+@auth.login_required
+def delete_avatar():
+    """Remove the current user's custom avatar.
+
+    Route: ``DELETE /avatar``
+
+    :returns: ``"ok"`` on success.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    db = sqlite3.connect(auth.AUTH_DB)
+    db.execute(_WAL)
+    row = db.execute(_SQL_AVATAR, (user,)).fetchone()
+    if row and row[0]:
+        try:
+            (AVATAR_DIR / row[0]).unlink()
+        except FileNotFoundError:
+            pass
+    db.execute(_SQL_ENSURE_SETTINGS, (user,))
+    db.execute(
+        "UPDATE user_settings SET avatar_file = NULL WHERE username = ?",
+        (user,),
+    )
+    db.commit()
+    db.close()
+    return "ok"
+
+
+def _apply_delete_to_messages(user, delete_type):
+    """Anonymise (soft) or remove (hard) a departing user's messages.
+
+    Acts on the single shared ``messages`` table. The FTS index follows
+    automatically via its triggers (rename re-indexes; delete removes).
+    """
+    db = get_db()
+    if delete_type == "soft":
+        db.execute(
+            "UPDATE messages SET sender = 'Deleted User' WHERE sender = ?", (user,)
+        )
+    else:
+        db.execute("DELETE FROM messages WHERE sender = ?", (user,))
+        db.execute("DELETE FROM reactions WHERE reactor = ?", (user,))
+    db.execute("DELETE FROM read_state WHERE user = ?", (user,))
+    db.execute("DELETE FROM dm_hidden WHERE user = ?", (user,))
+    db.commit()
+    db.close()
+
+
+@chat_bp.route("/delete_account", methods=["POST"])
+@auth.login_required
+def delete_account():
+    """Soft or hard delete the current user's account.
+
+    Route: ``POST /delete_account``
+
+    JSON body: ``{"type": "soft"|"hard", "password": "<current password>"}``
+
+    **Soft delete** — removes the user's credentials and settings from
+    ``auth.db``, renames their messages to ``"Deleted User"`` in every
+    recipient's database, and deletes their avatar file.  Message history
+    remains visible.
+
+    **Hard delete** — performs the soft delete steps and additionally removes
+    every message they sent from all recipient databases, deletes their own
+    database file, and purges their records from ``presence.db``.
+
+    In both cases the session is cleared and the client should redirect to
+    the login page.
+
+    :returns: JSON ``{"status": "ok"}`` on success, or an error response.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+    delete_type = data.get("type")
+    password = data.get("password", "")
+
+    if delete_type not in ("soft", "hard"):
+        return jsonify({"error": "Invalid delete type."}), 400
+
+    # Verify password before doing anything destructive
+    adb = sqlite3.connect(auth.AUTH_DB)
+    adb.execute(_WAL)
+    row = adb.execute(
+        "SELECT password_hash FROM users WHERE username = ?", (user,)
+    ).fetchone()
+    adb.close()
+
+    if not row or not check_password_hash(row[0], password):
+        return jsonify({"error": "Incorrect password."}), 403
+
+    adb = sqlite3.connect(auth.AUTH_DB)
+    adb.execute(_WAL)
+    avatar_row = adb.execute(
+        "SELECT avatar_file FROM user_settings WHERE username = ?", (user,)
+    ).fetchone()
+    adb.close()
+
+    # Anonymise or remove the user's messages in the shared database, and drop
+    # their read/hidden state.
+    _apply_delete_to_messages(user, delete_type)
+
+    # Clean presence.db for both delete types — removes the user from private
+    # channel membership so they are no longer treated as a member.
+    pdb = sqlite3.connect(presence.PRESENCE_DB)
+    pdb.execute(_WAL)
+    pdb.execute("DELETE FROM presence WHERE user = ?", (user,))
+    pdb.execute("DELETE FROM typing WHERE user = ?", (user,))
+    pdb.execute("DELETE FROM private_channel_members WHERE username = ?", (user,))
+    pdb.execute("DELETE FROM call_participants WHERE username = ?", (user,))
+    pdb.commit()
+    pdb.close()
+
+    # Delete avatar file
+    if avatar_row and avatar_row[0]:
+        try:
+            (AVATAR_DIR / avatar_row[0]).unlink()
+        except FileNotFoundError:
+            pass
+
+    # Remove from auth.db
+    adb = sqlite3.connect(auth.AUTH_DB)
+    adb.execute(_WAL)
+    adb.execute("DELETE FROM users WHERE username = ?", (user,))
+    adb.execute("DELETE FROM user_settings WHERE username = ?", (user,))
+    adb.execute("DELETE FROM password_reset_tokens WHERE username = ?", (user,))
+    adb.commit()
+    adb.close()
+
+    session.clear()
+    audit.account_deleted(user, delete_type)
+    return jsonify({"status": "ok"})
+
+
+@chat_bp.route("/online_users", methods=["GET"])
+@auth.login_required
+def online_users():
+    """Return presence states for all recently active users.
+
+    Route: ``GET /online_users``
+
+    Requires authentication.  Queries ``presence.db`` for any user whose
+    ``last_seen`` timestamp is within the last 3600 seconds (one hour).
+    Users who have not reported any presence update in that window are
+    considered offline and excluded from the response.
+
+    Possible state values returned: ``"active"``, ``"idle"``, ``"hidden"``,
+    ``"offline"``.  States are lowercased before being returned.
+
+    The client polls this endpoint once per second to refresh the colored
+    presence indicator (dot) displayed next to each username in the sidebar.
+
+    :returns: JSON object mapping username strings to their current presence
+        state, e.g. ``{"alice": "active", "bob": "idle"}``.
+    :rtype: flask.Response (application/json)
+    """
+    presence_timeout = 3600
+    cutoff = int(time()) - presence_timeout
+    db = sqlite3.connect(presence.PRESENCE_DB)
+    db.execute(_WAL)
+    db.row_factory = sqlite3.Row
+
+    rows = db.execute(
+        "SELECT user, state, override FROM presence WHERE last_seen >= ?",
+        (cutoff,),
+    ).fetchall()
+
+    db.close()
+
+    # A manual override (set in the account modal) wins over the live,
+    # activity-derived state; otherwise fall back to the real state.
+    return jsonify(
+        {row["user"]: (row["override"] or row["state"]).lower() for row in rows}
+    )
+
+
+def messages_since(channel, user, after):
+    """Return the message rows for *channel* that changed since *after*.
+
+    This is the cursor-based core shared by the ``/messages`` polling route and
+    the SSE push stream (:mod:`minimost.events`).  It applies the same
+    late-joiner history clamp and reaction enrichment the route has always done,
+    and returns plain Python dicts (not a Flask response) so the streaming
+    handler can serialise them itself and advance its own cursor.
+
+    :param channel: The channel name or DM identifier (already access-checked
+        by the caller).
+    :param user: The requesting username (for the late-joiner history clamp).
+    :param after: Unix timestamp; only rows modified after this point return.
+    :returns: List of message dicts, oldest first, each with a ``reactions``
+        key (JSON string or ``None``).
+    :rtype: list[dict]
+    """
+    # Members added to a private channel after creation don't see the backlog.
+    hist_start = _history_start(channel, user)
+    after = max(after, hist_start) if hist_start is not None else after
+
+    db = get_db()
+    rows = db.execute(
+        """
+        SELECT
+            id,
+            channel,
+            sender,
+            content,
+            content_type,
+            filename,
+            ts,
+            edited,
+            edited_ts,
+            deleted,
+            deleted_ts,
+            reply_to_id,
+            reactions_ts,
+            mentions
+        FROM messages
+        WHERE channel = ?
+          AND (
+                (deleted = 0 AND (ts > ? OR (edited_ts IS NOT NULL AND edited_ts > ?) OR reactions_ts > ?))
+                OR (deleted = 1 AND deleted_ts > ?)
+              )
+        ORDER BY ts
+    """,
+        (channel, after, after, after, after),
+    ).fetchall()
+
+    result = [dict(r) for r in rows]
+    _attach_reactions(db, result)
+    db.close()
+    return result
+
+
+# Columns every message-returning query selects, kept in one place so the
+# cursor query and the paged history query can't drift apart.
+#
+# ``content_type`` is what marks a row as a system notice ("X renamed the
+# channel", the welcome greeting) rather than something a person typed. Leaving
+# it out of the payload made every such notice render as an ordinary message,
+# repliable and reactable, with none of its styling.
+_MESSAGE_COLUMNS = """
+    id, channel, sender, content, content_type, filename, ts, edited, edited_ts,
+    deleted, deleted_ts, reply_to_id, reactions_ts, mentions
+"""
+
+# How many messages a single history request returns. Channels are loaded a
+# page at a time rather than whole: a long-lived channel would otherwise ship
+# its entire backlog on every open, and put every message of it in the DOM.
+HISTORY_PAGE_SIZE = 100
+
+
+def _attach_reactions(db, result):
+    """Merge current reactions into *result* rows in place, as JSON strings."""
+    if not result:
+        return
+    ids = [r["id"] for r in result]
+    placeholders = ",".join("?" * len(ids))
+    rx_rows = db.execute(
+        f"SELECT message_id, emoji, reactor FROM reactions WHERE message_id IN ({placeholders})",  # nosec B608
+        ids,
+    ).fetchall()
+
+    rx_map: dict = {}
+    for message_id, emoji, reactor in rx_rows:
+        rx_map.setdefault(message_id, {}).setdefault(emoji, []).append(reactor)
+
+    for msg in result:
+        reactions_dict = rx_map.get(msg["id"])
+        msg["reactions"] = json.dumps(reactions_dict) if reactions_dict else None
+
+
+def messages_page(channel, user, before=None, limit=HISTORY_PAGE_SIZE):
+    """Return one page of a channel's history, newest page first.
+
+    Where :func:`messages_since` answers "what changed after this cursor", this
+    answers "give me the *n* messages ending here" — the query a client needs to
+    open a channel without downloading its entire past, and to walk backwards as
+    the user scrolls up.
+
+    Deleted rows are omitted rather than returned as tombstones: a client
+    paging through history has never seen them, so there is nothing to remove,
+    and letting them consume slots would return short pages.
+
+    :param channel: The channel name or DM identifier (already access-checked).
+    :param user: The requesting username (for the late-joiner history clamp).
+    :param before: Return only messages strictly older than this timestamp.
+        ``None`` starts from the newest message.
+    :param limit: Maximum rows to return.
+    :returns: List of message dicts, **oldest first**, each with a ``reactions``
+        key. Fewer than *limit* rows means the start of the channel was reached.
+    :rtype: list[dict]
+    """
+    hist_start = _history_start(channel, user)
+
+    clauses = ["channel = ?", "deleted = 0"]
+    params: list = [channel]
+    if before is not None:
+        clauses.append("ts < ?")
+        params.append(before)
+    if hist_start is not None:
+        clauses.append("ts >= ?")
+        params.append(hist_start)
+    params.append(limit)
+
+    db = get_db()
+    # Newest-first with a LIMIT to select the window, then flipped so callers
+    # always receive rows in the chronological order the renderer expects.
+    rows = db.execute(
+        f"SELECT {_MESSAGE_COLUMNS} FROM messages "  # nosec B608
+        f"WHERE {' AND '.join(clauses)} ORDER BY ts DESC LIMIT ?",
+        params,
+    ).fetchall()
+
+    result = [dict(r) for r in reversed(rows)]
+    _attach_reactions(db, result)
+    db.close()
+    return result
+
+
+@chat_bp.route("/messages/<channel>", methods=["GET"])
+@auth.login_required
+def messages(channel):
+    """Fetch messages for a channel since a given timestamp.
+
+    Route: ``GET /messages/<channel>?after=<timestamp>``
+
+    Requires authentication.  The client delivers messages through the SSE
+    push stream (:mod:`minimost.events`), which shares the same cursor-based
+    core (:func:`messages_since`); this route exposes that core over plain
+    HTTP, passing the timestamp of the last message seen as the ``after``
+    query parameter so only rows changed since that point are returned.
+
+    **What is returned:**
+
+    A message row is included in the response if **any** of the following
+    conditions are true since *after*:
+
+    * It is a new, non-deleted message (``ts > after``).
+    * It has been edited since *after* (``edited_ts > after``).
+    * Its reactions have been updated since *after* (``reactions_ts > after``).
+    * It was deleted after *after* (``deleted = 1 AND deleted_ts > after``).
+      Deleted tombstones are returned so the client can remove the message
+      from view.
+
+    **Reactions enrichment:**
+
+    After selecting the changed message rows, the current reactions for all of
+    them are fetched from the ``reactions`` table (keyed by message ``id``) and
+    merged into each row as a JSON string under the ``reactions`` key.
+
+    **``after`` parameter handling:**
+
+    * The string ``"NaN"`` (case-insensitive) is treated as ``0.0`` to guard
+      against clients passing ``NaN`` on first load.
+    * Non-numeric values are silently converted to ``0.0``.
+
+    :param channel: The channel name or DM identifier.
+    :type channel: str
+
+    Query parameters:
+        **after** (float, optional): Unix timestamp.  Only messages modified
+        after this point are returned.  Defaults to ``0`` (return all
+        messages).
+
+    :returns: JSON array of message objects.  Each object has keys:
+        ``id``, ``channel``, ``sender``, ``content``, ``filename``, ``ts``,
+        ``edited``, ``edited_ts``, ``deleted``, ``deleted_ts``,
+        ``reply_to_id``, ``reactions`` (JSON string or null),
+        ``reactions_ts``.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+
+    # All messages now live in one shared database, so the channel-access check
+    # that per-user databases gave us implicitly must be made explicit here.
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+
+    after_raw = request.args.get("after", "0")
+    if after_raw.lower() == "nan":
+        after = 0.0
+    else:
+        try:
+            after = float(
+                after_raw
+            )  # nosemgrep: python.flask.security.injection.nan-injection.nan-injection
+        except (ValueError, TypeError):
+            after = 0.0
+
+    # A first load (after=0) asks for a page, not the whole channel. Deltas
+    # (after>0) stay uncapped — they are bounded by how much changed since the
+    # cursor, and dropping any of them would desynchronise the client.
+    #
+    # Omitting ``limit`` at after=0 deliberately still returns the whole channel
+    # including deleted tombstones: that is the full-sync form of this endpoint
+    # (see test_messages_deleted_tombstone and the paging tests that use it as
+    # their reference). The app's own callers always page — the browser client
+    # sends HISTORY_PAGE_SIZE, and the /events stream resolves a zero cursor to
+    # a page in _safe_messages — so nothing on the hot path takes this branch.
+    if after == 0 and request.args.get("limit"):
+        try:
+            limit = max(1, min(int(request.args["limit"]), 200))
+        except (ValueError, TypeError):
+            limit = HISTORY_PAGE_SIZE
+        return jsonify(messages_page(channel, user, limit=limit))
+
+    return jsonify(messages_since(channel, user, after))
+
+
+@chat_bp.route("/messages_before/<channel>", methods=["GET"])
+@auth.login_required
+def messages_before(channel):
+    """Return the page of history immediately older than a timestamp.
+
+    Route: ``GET /messages_before/<channel>?before=<ts>&limit=<n>``
+
+    Backfill for scrolling up. ``/messages`` walks *forward* from a cursor, so
+    it can't express "the messages before this one"; this walks backward.
+
+    :param channel: The channel name or DM identifier.
+
+    Query parameters:
+        **before** (float, required): Return messages strictly older than this.
+        **limit** (int, optional): Page size, capped at 200.
+
+    :returns: JSON array of message objects, oldest first. Fewer than *limit*
+        rows means the start of the channel was reached.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+
+    try:
+        before = float(request.args.get("before", ""))
+    except (ValueError, TypeError):
+        return "invalid before", 400
+    if math.isnan(before):  # "nan" parses fine but can never match a timestamp
+        return "invalid before", 400
+
+    try:
+        limit = max(1, min(int(request.args.get("limit", HISTORY_PAGE_SIZE)), 200))
+    except (ValueError, TypeError):
+        limit = HISTORY_PAGE_SIZE
+
+    return jsonify(messages_page(channel, user, before=before, limit=limit))
+
+
+def _insert_message(
+    db, channel, sender, text, ts, reply_to_id, filenames, mentions=None
+):
+    """Insert a message (and/or its file attachments) as canonical rows.
+
+    One row per text body and one per uploaded file, all in the single shared
+    database. Does not commit or close — the caller owns the transaction.
+    """
+    if text:
+        db.execute(
+            "INSERT INTO messages (channel, sender, content, filename, ts, reply_to_id, mentions)"
+            " VALUES (?, ?, ?, NULL, ?, ?, ?)",
+            (channel, sender, text, ts, reply_to_id, mentions),
+        )
+    for filename in filenames:
+        db.execute(
+            "INSERT INTO messages (channel, sender, content, filename, ts, reply_to_id)"
+            " VALUES (?, ?, '', ?, ?, ?)",
+            (channel, sender, filename, ts, reply_to_id),
+        )
+
+
+def seed_read_state(user: str, ts: Optional[float] = None) -> None:
+    """Start *user* caught up on every public channel as of *ts*.
+
+    Messages live in one shared database, so a new account can see the whole
+    public backlog the instant it exists — and, with no read watermark, every
+    message of it counted as unread. A first login therefore opened on hundreds
+    of unread badges, a flashing favicon and an unread count in the tab title,
+    none of which the user had any way to have read. Seeding the watermark
+    leaves the history there to scroll back through while starting the account
+    at zero unread; anything posted after this point is genuinely new.
+
+    :param user: The new account's canonical username.
+    :param ts: Watermark to set, defaulting to now.
+    :returns: None
+    """
+    if not CHANNELS:
+        return
+    when = time() if ts is None else ts
+    db = get_db()
+    try:
+        for channel in CHANNELS:
+            _advance_read(db, user, channel, when)
+        db.commit()
+    finally:
+        db.close()
+
+
+def post_welcome_message(new_user: str) -> None:
+    """Post a system welcome message greeting a new user.
+
+    Called from the signup flow when a new account is created.  Inserts a
+    ``content_type = "system"`` message — rendered under the "MiniMost"
+    identity, like other system notices — into the first public channel for
+    every recipient (including the newcomer), so the whole community sees
+    the new arrival being greeted.
+
+    No-op if no public channels are configured.
+
+    :param new_user: The username of the newly registered account.
+    :type new_user: str
+    :returns: None
+    """
+    if not CHANNELS:
+        return
+    channel = CHANNELS[0]
+    content = f"Welcome to MiniMost, {new_user}! \U0001f44b Say hello \U0001f44b"
+    db = get_db()
+    db.execute(_INSERT_MSG_SQL, (channel, "system", content, "system", time()))
+    db.commit()
+    db.close()
+
+
+@chat_bp.route("/send/<channel>", methods=["POST"])
+@auth.login_required
+@ratelimit.rate_limit("send", by="user")
+def send(channel):
+    """Send a message (and/or image attachments) to a channel.
+
+    Route: ``POST /send/<channel>``
+
+    Requires authentication.  Validates the channel, processes any uploaded
+    images, then inserts the message into the shared message database.
+
+    **Form fields:**
+
+    * ``text`` (str, optional) — The message body.  Trailing whitespace is
+      stripped.
+    * ``reply_to_id`` (int, optional) — The ``id`` of the message being
+      replied to.  Stored as a foreign key in the ``reply_to_id`` column.
+    * ``files`` (multipart file list, optional) — One or more image files.
+      Only files with extensions in :data:`ALLOWED_EXTENSIONS` are saved;
+      others are silently skipped.
+
+    At least one of *text* or *files* must be non-empty; a request with
+    neither returns ``400 empty``.
+
+    **Message storage:**
+
+    Each message is one canonical row in the shared ``messages`` table:
+
+    * A text body becomes one row; each uploaded image becomes an additional
+      row (``content = ''`` with ``filename`` set to the UUID-based filename).
+      Each send is always its own canonical row — consecutive short messages
+      from the same sender are kept separate in the backend and only grouped
+      visually in the frontend.
+    * The sender's read watermark for the channel is advanced to this message,
+      so their own message never counts as unread.
+
+    **File naming:**
+
+    Uploaded images are saved as ``<uuid4hex><original_ext>`` in
+    :data:`UPLOAD_DIR` to prevent collisions and avoid directory traversal
+    via crafted filenames.
+
+    :param channel: Target channel name or DM identifier.
+    :type channel: str
+    :returns: The string ``"ok"`` on success.
+    :rtype: flask.Response
+
+    :raises: ``403 forbidden`` — if the user is not permitted to post to the
+        channel.
+    :raises: ``400 empty`` — if neither text nor valid files were provided.
+    """
+    sender = session["user"]
+
+    if not is_valid_channel(channel, sender):
+        return "forbidden", 403
+
+    # Refuse to post into a conversation with nobody on the other end, rather
+    # than accepting the message and dropping it (see unknown_dm_participants).
+    missing = unknown_dm_participants(channel)
+    if missing:
+        return "no account named {0}".format(", ".join(missing)), 400
+
+    text = (request.form.get("text") or "").rstrip()
+    if len(text) > MAX_MESSAGE_LEN:
+        return f"message too long (max {MAX_MESSAGE_LEN} characters)", 413
+    reply_to_id_raw = request.form.get("reply_to_id")
+    try:
+        reply_to_id = int(reply_to_id_raw) if reply_to_id_raw else None
+    except (ValueError, TypeError):
+        reply_to_id = None
+
+    files = request.files.getlist("files")
+    size_err = _check_upload_sizes(files, _max_upload_size_bytes())
+    if size_err:
+        return size_err
+
+    filenames = _save_uploaded_files(files)
+
+    if not text and not filenames:
+        return "empty", 400
+
+    ts = time()
+    db = get_db()
+    try:
+        mentions = _mentions_json(text, channel)
+        _insert_message(db, channel, sender, text, ts, reply_to_id, filenames, mentions)
+        # The sender has implicitly read up to their own message.
+        _advance_read(db, sender, channel, ts)
+        db.commit()
+    finally:
+        db.close()
+
+    return "ok"
+
+
+@chat_bp.route("/message/<int:msg_id>", methods=["GET"])
+@auth.login_required
+def get_message(msg_id):
+    """Fetch a single message by its database ID.
+
+    Route: ``GET /message/<msg_id>``
+
+    Requires authentication.  Used by the client to load the quoted parent
+    message when rendering a reply thread, since the ``reply_to_id`` column
+    stores only the ID rather than the full message content.
+
+    The message is looked up by ``id`` in the shared database; access is then
+    gated on whether the caller may see its channel, so a 404 is returned both
+    when the message does not exist and when the caller cannot access it.
+
+    :param msg_id: The integer primary key of the message to retrieve.
+    :type msg_id: int
+    :returns: JSON object with keys ``id``, ``sender``, ``content``,
+        ``filename``, and ``deleted``.
+    :rtype: flask.Response (application/json)
+
+    :raises: ``404 not found`` — if no message with *msg_id* exists, or the
+        caller may not access its channel.
+    """
+    user = session["user"]
+    db = get_db()
+    row = db.execute(
+        "SELECT id, channel, sender, content, filename, deleted FROM messages WHERE id = ?",
+        (msg_id,),
+    ).fetchone()
+    db.close()
+    if not row:
+        return _NOT_FOUND, 404
+    # With one shared message table the per-user-DB scoping that used to bound
+    # this lookup is gone, so gate on channel visibility explicitly — otherwise
+    # any id could read messages from private channels/DMs the caller isn't in.
+    # Return 404 (not 403) so the endpoint doesn't confirm a message exists.
+    if not is_valid_channel(row["channel"], user):
+        return _NOT_FOUND, 404
+    result = dict(row)
+    result.pop("channel", None)
+    return jsonify(result)
+
+
+def _can_access_file(filename: str, user: str) -> bool:
+    """Return ``True`` if *user* can see any message carrying *filename*.
+
+    Uploads live in one flat directory and are addressed by name alone, so
+    without this the only thing standing between an attachment and any logged-in
+    account is the 32-char UUID in its name — an attachment posted to a private
+    channel or DM stayed readable by anyone who came across the URL (browser
+    history, a pasted link, a proxy log).  Attachments inherit the visibility of
+    the messages that carry them, exactly as ``/message/<id>`` does.
+
+    :param filename: The stored upload name, as it appears in ``messages``.
+    :param user: The requesting username.
+    :rtype: bool
+    """
+    db = get_db()
+    rows = db.execute(
+        "SELECT DISTINCT channel FROM messages WHERE filename = ?",
+        (filename,),
+    ).fetchall()
+    db.close()
+    return any(is_valid_channel(r["channel"], user) for r in rows)
+
+
+@chat_bp.route("/files/<path:filename>", methods=["GET"])
+@auth.login_required
+def files(filename):
+    """Serve an uploaded file.
+
+    Route: ``GET /files/<filename>``
+
+    Images are served inline; all other file types are served as attachments
+    so the browser downloads rather than attempts to render them.
+
+    Only served if the caller can see a message carrying the file.  Returns 404
+    (not 403) so the endpoint doesn't confirm that an unreadable file exists.
+    """
+    if not _can_access_file(filename, session["user"]):
+        return _NOT_FOUND, 404
+
+    ext = Path(filename).suffix.lower()
+    as_attachment = ext not in IMAGE_EXTENSIONS
+    if as_attachment:
+        # Recover the name the sender used, so the download is named sensibly.
+        return common.send_attachment(
+            send_from_directory,
+            UPLOAD_DIR,
+            filename,
+            as_attachment=True,
+            name=_decode_upload_name(filename),
+        )
+    return send_from_directory(UPLOAD_DIR, filename)
+
+
+@chat_bp.route("/file_preview/<path:filename>", methods=["GET"])
+@auth.login_required
+def file_preview(filename):
+    """Return a code preview for an uploaded text file.
+
+    Route: ``GET /file_preview/<filename>``
+
+    Reads the file from :data:`UPLOAD_DIR`, checks its extension against the
+    known text-file extension set, and returns the same code-preview dict shape
+    used by the Bitbucket preview routes.  Returns ``{}`` for unrecognised
+    extensions or unreadable files.
+    """
+    safe_name = _secure_filename(filename)
+    if not safe_name:
+        abort(404)
+    # Same visibility rule as /files — the preview returns the file's contents.
+    if not _can_access_file(safe_name, session["user"]):
+        abort(404)
+    path = UPLOAD_DIR / safe_name
+
+    # Strip the 32-char UUID prefix to recover the original filename — needed
+    # both for the header and for matching special names (Makefile, Jenkinsfile)
+    # whose stored form is prefixed and so never matches on its own.
+    display_name = (
+        filename[33:] if len(filename) > 33 and filename[32] == "_" else filename
+    )
+
+    if not preview_mod.is_text_filename(display_name):
+        return jsonify({})
+
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return jsonify({})
+
+    result = preview_mod._build_code_result(
+        raw, display_name, None, None, f"/files/{filename}"
+    )
+    return jsonify(result)
+
+
+def _compose_search_sql(query, clauses, params):
+    """Build the SQL statement and bound parameters for :func:`search_messages`.
+
+    Picks the trigram FTS5 path for keyword queries long enough for the index
+    and falls back to a plain ``LIKE`` scan otherwise (or when there is no
+    keyword at all). Only constant clause strings are concatenated; every user
+    value is passed as a ``?`` placeholder, so this is not an injection vector.
+
+    :param query: The (already stripped) keyword, possibly empty.
+    :param clauses: The ``WHERE`` clause fragments accumulated so far.
+    :param params: The bound parameters matching *clauses*.
+    :returns: A ``(sql, params)`` tuple ready for execution.
+    :rtype: tuple[str, list]
+    """
+    if query and len(query) >= common.SEARCH_MIN_TOKEN:
+        # Trigram-indexed substring match: the MATCH is served from messages_fts
+        # in sub-millisecond time however large the history is. Wrapping the query
+        # in a quoted FTS5 phrase (doubling any embedded quote) makes it a literal
+        # substring with no special-character handling, matching LIKE semantics.
+        # `id` is AUTOINCREMENT and so monotonic with `ts`, so ordering by the FTS
+        # rowid descending is newest-first and lets FTS5 stop after 50 rows
+        # instead of sorting the full match set.
+        match = '"' + query.replace('"', '""') + '"'
+        sql = (
+            "SELECT m.id, m.channel, m.sender, m.content, m.ts "  # nosec B608
+            "FROM messages_fts f JOIN messages m ON m.id = f.rowid "
+            "WHERE f.content MATCH ? AND " + " AND ".join(clauses) + " "
+            "ORDER BY f.rowid DESC LIMIT 50"
+        )
+        return sql, [match, *params]
+
+    # No keyword, or one too short for the trigram index (< 3 chars): a plain scan.
+    if query:
+        clauses.append("m.content LIKE ?")
+        params.append(f"%{query}%")
+    sql = (
+        "SELECT m.id, m.channel, m.sender, m.content, m.ts FROM messages m "  # nosec B608
+        "WHERE " + " AND ".join(clauses) + " ORDER BY m.ts DESC LIMIT 50"
+    )
+    return sql, params
+
+
+@chat_bp.route("/search_messages", methods=["GET"])
+@auth.login_required
+def search_messages():
+    """Search the current user's message history by keyword.
+
+    Route: ``GET /search_messages?q=<query>``
+
+    Requires authentication.  Performs a case-insensitive substring search
+    across the ``content`` column of the current user's ``messages`` table,
+    excluding deleted messages.  The keyword match is served by the trigram
+    FTS5 index (:func:`~minimost.common._ensure_search_index`) so it stays
+    sub-millisecond regardless of history size; queries shorter than
+    :data:`~minimost.common.SEARCH_MIN_TOKEN` characters, which the trigram
+    index cannot serve, fall back to a plain ``LIKE`` scan.
+
+    Results are returned in descending timestamp order (newest first) and
+    limited to 50 rows to keep responses fast.  The search runs over the single
+    shared database but is constrained by an explicit access clause (see
+    :func:`_search_access`) to only the channels the caller may read — public
+    channels, the private channels they belong to, and their own DMs — with
+    private-channel backlog hidden from late joiners.
+
+    Query parameters (all optional, combined with ``AND``):
+        **q** (str): Keyword matched as a case-insensitive ``LIKE`` substring
+        of the message content.
+
+        **from** (str): Restrict to messages from this sender (matched
+        case-insensitively).
+
+        **channel** (str): Restrict to a single channel identifier.
+
+        **start** / **end** (float): Inclusive lower / exclusive upper bound
+        on the message timestamp, as epoch seconds.  The client computes
+        these from the picked dates using the viewer's local timezone.
+
+    At least one filter must be supplied; a request with no filters returns
+    ``[]`` without hitting the database, so an empty search box never dumps
+    the whole history.
+
+    :returns: JSON array of matching message objects, each with keys
+        ``id``, ``channel``, ``sender``, ``content``, and ``ts``.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+
+    query = request.args.get("q", "").strip()
+    sender = request.args.get("from", "").strip()
+    channel = request.args.get("channel", "").strip()
+    start_ts = _opt_float(request.args.get("start"))
+    end_ts = _opt_float(request.args.get("end"))
+
+    # An empty search box must never dump the whole history.
+    if not (query or sender or channel or start_ts is not None or end_ts is not None):
+        return jsonify([])
+
+    # Filters on the base table. The `m.` alias matches both query shapes below.
+    clauses = ["m.deleted = 0"]
+    params = []
+    if sender:
+        clauses.append("m.sender = ? COLLATE NOCASE")
+        params.append(sender)
+
+    # Channel access control. With one shared database the search must be
+    # confined to channels the user may read — a single explicit channel they
+    # can access, or otherwise the full set of channels visible to them.
+    history_starts = {}
+    if channel:
+        if not is_valid_channel(channel, user):
+            return jsonify([])
+        clauses.append("m.channel = ?")
+        params.append(channel)
+        hs = _history_start(channel, user)
+        if hs is not None:
+            history_starts[channel] = hs
+    else:
+        access_clause, access_params, history_starts = _search_access(user)
+        clauses.append(access_clause)
+        params.extend(access_params)
+
+    if start_ts is not None:
+        clauses.append("m.ts >= ?")
+        params.append(start_ts)
+    if end_ts is not None:
+        clauses.append("m.ts < ?")
+        params.append(end_ts)
+
+    sql, params = _compose_search_sql(query, clauses, params)
+
+    db = get_db()
+    # The SQL text is built only from constant clause fragments in
+    # _compose_search_sql / _search_access; every user value is a bound `?`
+    # parameter, so this is not an injection sink despite the dynamic assembly.
+    cur = db.execute(sql, params)  # codeql[py/sql-injection]
+    results = [dict(r) for r in cur.fetchall()]
+    db.close()
+
+    # Hide private-channel backlog from members who joined later.
+    if history_starts:
+        results = [
+            r
+            for r in results
+            if r["channel"] not in history_starts
+            or r["ts"] >= history_starts[r["channel"]]
+        ]
+
+    return jsonify(results)
+
+
+@chat_bp.route("/edit/<int:msg_id>", methods=["POST"])
+@auth.login_required
+def edit(msg_id):
+    """Edit the text content of the current user's message.
+
+    Route: ``POST /edit/<msg_id>``
+
+    Requires authentication.  Only the original sender may edit a message;
+    any other user's attempt returns ``403 forbidden``.
+
+    Only text messages can be edited — rows with a non-null ``filename``
+    (image attachments) are excluded from the ``UPDATE`` by the
+    ``AND filename IS NULL`` clause.
+
+    **Propagation:**
+
+    The message is a single canonical row in the shared database, so the edit
+    is one ``UPDATE`` by ``id``.  The ``edited`` flag is set to ``1`` and
+    ``edited_ts`` records when the edit occurred so the change query
+    (:func:`messages_since`) picks it up for every viewer.
+
+    Form fields:
+        **text** (str): The new message content.  Stripped of leading/trailing
+        whitespace.
+
+    :param msg_id: The integer ``id`` of the message to edit.
+    :type msg_id: int
+    :returns: The string ``"ok"`` on success.
+    :rtype: flask.Response
+
+    :raises: ``403 forbidden`` — if the message does not belong to the
+        current user or does not exist.
+    """
+    editor = session["user"]
+    new_text = request.form.get("text", "").strip()
+    if not new_text:
+        return "empty", 400
+    if len(new_text) > MAX_MESSAGE_LEN:
+        return f"message too long (max {MAX_MESSAGE_LEN} characters)", 413
+
+    db = get_db()
+    row = db.execute(_MSG_LOOKUP_SQL, (msg_id,)).fetchone()
+
+    if not row or row["sender"] != editor:
+        db.close()
+        return "forbidden", 403
+
+    # An attachment row has no text body to edit and a deleted one is gone. The
+    # UPDATE's own `filename IS NULL` guard silently matched nothing in the first
+    # case and still answered "ok", so the client showed the edit as applied and
+    # only a reload revealed it had never happened.
+    if row["filename"] is not None or row["deleted"]:
+        db.close()
+        return "not editable", 409
+
+    mentions = _mentions_json(new_text, row["channel"])
+    db.execute(
+        """
+        UPDATE messages
+        SET content = ?, edited = 1, edited_ts = ?, mentions = ?
+        WHERE id = ? AND filename IS NULL
+        """,
+        (new_text, time(), mentions, msg_id),
+    )
+    db.commit()
+    db.close()
+
+    return "ok"
+
+
+@chat_bp.route("/delete/<int:msg_id>", methods=["POST"])
+@auth.login_required
+def delete_message(msg_id):
+    """Soft-delete the current user's message.
+
+    Route: ``POST /delete/<msg_id>``
+
+    Requires authentication.  Only the original sender may delete a message;
+    other users receive ``403 forbidden``.
+
+    **Soft delete, not hard delete:**
+
+    The message row is *not* removed from the database.  Instead, ``deleted``
+    is set to ``1`` and ``deleted_ts`` records when the deletion occurred.
+    This allows the change query (:func:`messages_since`) to return a
+    tombstone to any client that has already cached the message, so they can
+    remove it from their view.  The actual row is preserved for audit/admin
+    purposes.
+
+    **Propagation:**
+
+    Like edits, the soft-delete is a single ``UPDATE`` by ``id`` on the
+    canonical row in the shared database, so every viewer sees it.
+
+    :param msg_id: The integer ``id`` of the message to delete.
+    :type msg_id: int
+    :returns: The string ``"ok"`` on success.
+    :rtype: flask.Response
+
+    :raises: ``403 forbidden`` — if the message was not sent by the current
+        user or does not exist.
+    """
+    deleter = session["user"]
+
+    db = get_db()
+    row = db.execute(_MSG_LOOKUP_SQL, (msg_id,)).fetchone()
+
+    if not row or row["sender"] != deleter:
+        db.close()
+        return "forbidden", 403
+
+    db.execute(
+        "UPDATE messages SET deleted = 1, deleted_ts = ? WHERE id = ?",
+        (time(), msg_id),
+    )
+    db.commit()
+    db.close()
+
+    return "ok"
+
+
+VALID_REACTIONS = {
+    # Original set
+    "airplane",
+    "alien",
+    "angry",
+    "anguished",
+    "apple",
+    "archery",
+    "astonished",
+    "atom",
+    "avocado",
+    "axolotl",
+    "balloon",
+    "banana",
+    "bandage",
+    "basketball",
+    "bat",
+    "bear",
+    "bee",
+    "beer",
+    "bell",
+    "bento",
+    "bicycle",
+    "bomb",
+    "book",
+    "boxing",
+    "brain",
+    "bread",
+    "broken_heart",
+    "bug",
+    "bulb",
+    "burger",
+    "butterfly",
+    "cactus",
+    "cake",
+    "call_me",
+    "camera",
+    "candle",
+    "canoe",
+    "car",
+    "cat",
+    "champagne",
+    "chart",
+    "check",
+    "chess",
+    "chocolate",
+    "clapper_board",
+    "clap",
+    "cloud",
+    "clown",
+    "cocktail",
+    "coffee",
+    "cold_face",
+    "comet",
+    "compass",
+    "confounded",
+    "cowboy",
+    "crab",
+    "cross_fingers",
+    "crown",
+    "crying",
+    "crystal_ball",
+    "curry",
+    "dart",
+    "desert",
+    "devil",
+    "die",
+    "dinosaur",
+    "dizzy",
+    "dna",
+    "dog",
+    "donut",
+    "dragon",
+    "drum",
+    "duck",
+    "dumpling",
+    "earth",
+    "eyes",
+    "fire",
+    "fireworks",
+    "fist",
+    "flag",
+    "flamingo",
+    "flower",
+    "flushed",
+    "football",
+    "four_leaf",
+    "fox",
+    "fries",
+    "frog",
+    "gaming",
+    "gear",
+    "gem",
+    "ghost",
+    "gift",
+    "golf",
+    "grapes",
+    "grimace",
+    "grinning",
+    "guitar",
+    "gun",
+    "hammer",
+    "handshake",
+    "headphones",
+    "hear_no_evil",
+    "heart",
+    "heart_black",
+    "heart_blue",
+    "heart_box",
+    "heart_brown",
+    "heart_eyes",
+    "heart_green",
+    "heart_grow",
+    "heart_orange",
+    "heart_pink",
+    "heart_purple",
+    "heart_white",
+    "heart_yellow",
+    "hedgehog",
+    "helicopter",
+    "hot_dog",
+    "hot_face",
+    "hourglass",
+    "hugging",
+    "ice_cream",
+    "innocent",
+    "island",
+    "jellyfish",
+    "joystick",
+    "juice",
+    "key",
+    "laptop",
+    "laugh",
+    "lightning",
+    "lion",
+    "lock",
+    "love_you",
+    "magnet",
+    "magnify",
+    "mammoth",
+    "map",
+    "mask",
+    "medal",
+    "melting",
+    "microphone",
+    "microscope",
+    "milk",
+    "milky_way",
+    "mind_blown",
+    "money_mouth",
+    "money",
+    "monkey",
+    "monocle",
+    "moon",
+    "mountain",
+    "muscle",
+    "mushroom",
+    "music",
+    "nauseated",
+    "nerd",
+    "neutral",
+    "newspaper",
+    "no",
+    "octopus",
+    "ok",
+    "open_hands",
+    "owl",
+    "package",
+    "palette",
+    "palm_tree",
+    "pancakes",
+    "panda",
+    "parrot",
+    "partying",
+    "party",
+    "peace",
+    "pencil",
+    "penguin",
+    "pensive",
+    "persevere",
+    "phone",
+    "piano",
+    "pig",
+    "pill",
+    "pinch",
+    "pin",
+    "pizza",
+    "pleading",
+    "point_down",
+    "point_left",
+    "point_right",
+    "point_up",
+    "poop",
+    "popcorn",
+    "pray",
+    "rage",
+    "rainbow",
+    "raised_eyebrow",
+    "raised_hands",
+    "ramen",
+    "recycle",
+    "relieved",
+    "revolving_hearts",
+    "robot",
+    "rocket",
+    "rofl",
+    "sad",
+    "salute",
+    "saturn",
+    "scissors",
+    "scream",
+    "seal",
+    "see_no_evil",
+    "shark",
+    "shield",
+    "ship",
+    "shrimp",
+    "shushing",
+    "ski",
+    "skull",
+    "sleeping",
+    "slightly_smile",
+    "sloth",
+    "smile",
+    "smirk",
+    "snake",
+    "sneezing",
+    "snowflake",
+    "soccer",
+    "spaghetti",
+    "sparkle",
+    "sparkling_heart",
+    "speak_no_evil",
+    "star_struck",
+    "star",
+    "stethoscope",
+    "strawberry",
+    "sunflower",
+    "sunglasses",
+    "sun",
+    "surf",
+    "sushi",
+    "sweat_smile",
+    "swim",
+    "taco",
+    "tada",
+    "target",
+    "tea",
+    "telescope",
+    "tennis",
+    "test_flask",
+    "test_tube",
+    "thinking",
+    "thread",
+    "thumbsdown",
+    "thumbsup",
+    "tongue",
+    "toolbox",
+    "tornado",
+    "train",
+    "trash",
+    "triumph",
+    "trophy",
+    "trumpet",
+    "turtle",
+    "two_hearts",
+    "ufo",
+    "unicorn",
+    "upside_down",
+    "vampire",
+    "violin",
+    "volcano",
+    "vulcan",
+    "waffle",
+    "warning",
+    "watermelon",
+    "wave",
+    "whale",
+    "wink",
+    "wolf",
+    "woozy",
+    "worried",
+    "wow",
+    "wrench",
+    "writing",
+    "yarn",
+    "yawn",
+    "yoga",
+    "zap",
+    "zipper",
+    "zombie",
+    # More faces
+    "expressionless",
+    "no_mouth",
+    "rolling_eyes",
+    "hushed",
+    "sleepy",
+    "drooling",
+    "lying",
+    "exhaling",
+    "holding_back_tears",
+    "peeking",
+    "hand_over_mouth",
+    "dotted_face",
+    "shaking_face",
+    "diagonal_mouth",
+    "heart_on_fire",
+    "mending_heart",
+    # More gestures
+    "middle_finger",
+    "backhand_up",
+    "raised_back",
+    "heart_hands",
+    "left_fist",
+    "right_fist",
+    "splayed_hand",
+    "palm_up",
+    "palm_down",
+    "point_at_you",
+    # More animals
+    "horse",
+    "cow",
+    "sheep",
+    "goat",
+    "rabbit",
+    "hamster",
+    "mouse",
+    "chipmunk",
+    "otter",
+    "raccoon",
+    "skunk",
+    "gorilla",
+    "elephant",
+    "hippo",
+    "giraffe",
+    "camel",
+    "zebra",
+    "kangaroo",
+    "koala",
+    "deer",
+    "llama",
+    "peacock",
+    "swan",
+    "eagle",
+    "dove",
+    "rooster",
+    "fish",
+    "tropical_fish",
+    "dolphin",
+    "lobster",
+    "squid",
+    "snail",
+    "worm",
+    "oyster",
+    "rhino",
+    "crocodile",
+    "microbe",
+    # More food & drink
+    "bagel",
+    "croissant",
+    "pretzel",
+    "cheese",
+    "egg",
+    "bacon",
+    "sandwich",
+    "wrap",
+    "salad",
+    "soup",
+    "salt",
+    "honey",
+    "lollipop",
+    "candy",
+    "bubble_tea",
+    "ice",
+    "mate",
+    "fortune_cookie",
+    "tamale",
+    "flatbread",
+    "beans",
+    "blueberries",
+    "mango",
+    "kiwi",
+    "pear",
+    "peach",
+    "cherry",
+    "lemon",
+    "tangerine",
+    "pineapple",
+    "melon",
+    "tomato",
+    "garlic",
+    "onion",
+    "carrot",
+    "broccoli",
+    "corn",
+    "hot_pepper",
+    # More sports & activities
+    "baseball",
+    "softball",
+    "badminton",
+    "rugby",
+    "ping_pong",
+    "flying_disc",
+    "sled",
+    "parachute",
+    "martial_arts",
+    "climbing",
+    "weightlifting",
+    "skateboard",
+    "lacrosse",
+    "ice_skate",
+    "fishing",
+    "diving",
+    "cards",
+    # More music
+    "saxophone",
+    "banjo",
+    "accordion",
+    "notes",
+    "long_drum",
+    # More vehicles
+    "motorcycle",
+    "race_car",
+    "speedboat",
+    "sailboat",
+    "bus",
+    "truck",
+    "fire_truck",
+    "ambulance",
+    "tractor",
+    "motor_scooter",
+    # More nature & plants
+    "seedling",
+    "evergreen",
+    "deciduous",
+    "chestnut",
+    "cherry_blossom",
+    "rose",
+    "tulip",
+    "lotus",
+    "bouquet",
+    "wilted_flower",
+    "herb",
+    "maple_leaf",
+    "leaves",
+    "water_wave",
+    "droplet",
+    "fog",
+    "cyclone",
+    "umbrella",
+    "snowman",
+    "rainbow_flag",
+    # More symbols & objects
+    "hundred",
+    "speech_bubble",
+    "thought_bubble",
+    "zzz",
+    "anger",
+    "red_circle",
+    "blue_circle",
+    "green_circle",
+    "infinity",
+    "syringe",
+    "fire_extinguisher",
+    "safety_pin",
+    "broom",
+    "soap",
+    "nazar",
+    "teddy_bear",
+    "magic_wand",
+    "kite",
+    "yo_yo",
+    "boomerang",
+    "axe",
+    "ladder",
+    "mirror",
+    "chair",
+    "battery",
+    "floppy",
+    "cd",
+    "globe",
+    "satellite",
+    # Celebrations & holidays
+    "jack_o_lantern",
+    "christmas_tree",
+    "sparkler",
+    "firecracker",
+    "ribbon",
+    "ticket",
+}
+
+
+def _encode_upload_name(original: str) -> str:
+    """Turn an arbitrary upload filename into something safe to store, reversibly.
+
+    ``secure_filename`` is lossy for anything non-ASCII: it reduces ``报告.pdf`` to
+    ``pdf`` and ``季度总结 2026.docx`` to ``2026.docx``, which for a Chinese chat
+    means the recipient gets a file with no name and, worse, no extension.
+
+    Percent-encoding is used instead. It keeps the stored name filesystem-safe (no
+    separators, no ``..``, no control characters) while staying exactly reversible,
+    so the original name comes back on download and in the UI.
+
+    If everything would already survive ``secure_filename`` unchanged, that is used
+    verbatim -- stored names for ASCII uploads stay readable in the data directory.
+    """
+    # Drop any directory part. Browsers normally send a bare name, but a crafted
+    # request can send a path, and that path must never reach the filesystem.
+    name = original.replace("\\", "/").rsplit("/", 1)[-1]
+    name = name.strip().replace("\x00", "")
+    if not name:
+        return "file"
+
+    # Cap before encoding: a 60-character name of 3-byte characters encodes to at
+    # most 540 characters, still under the 255-byte limit for one path component
+    # once combined with the 33-character prefix.
+    name = name[:60]
+
+    encoded = urllib.parse.quote(name, safe=" ._-~()[]{}@+=,!&'")
+
+    # Never let the final component get near the 255-byte filesystem limit (the
+    # caller prepends a 33-character prefix).
+    limit = 180
+    if len(encoded) > limit:
+        encoded = encoded[:limit]
+        # Do not leave a dangling %XX escape, which would not decode.
+        tail = encoded
+        while tail and re.search(r"%[0-9A-Fa-f]?$", tail):
+            tail = tail[:-1]
+        encoded = tail or "file"
+    return encoded
+
+
+def _decode_upload_name(stored: str) -> str:
+    """Recover the original filename from a stored upload name.
+
+    Stored names are ``<32 hex><ext>`` for images and ``<32 hex>_<encoded>`` for
+    everything else, so the prefix is stripped and the remainder percent-decoded.
+    Old uploads used ``secure_filename``, which never produced ``%`` escapes; if
+    decoding fails the raw remainder is returned unchanged.
+    """
+    name = stored[33:] if len(stored) > 33 and stored[32] == "_" else stored
+    try:
+        return urllib.parse.unquote(name, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return name
+
+
+def _save_uploaded_files(files) -> List[str]:
+    """Save uploaded files of any type, returning their stored filenames.
+
+    Images are stored as ``<uuid32hex><ext>``.
+    All other files are stored as ``<uuid32hex>_<encoded original name>`` so the
+    original name can be recovered by slicing off the first 33 chars and decoding.
+    """
+    filenames = []
+    for f in files:
+        if not hasattr(f, "filename") or not f.filename:
+            continue
+        ext = os.path.splitext(f.filename)[1].lower()
+        uid = uuid.uuid4().hex
+        if ext in IMAGE_EXTENSIONS:
+            filename = f"{uid}{ext}"
+        else:
+            safe = _encode_upload_name(f.filename)
+            filename = f"{uid}_{safe}"
+        f.save(UPLOAD_DIR / filename)
+        filenames.append(filename)
+    return filenames
+
+
+@chat_bp.route("/react/<int:msg_id>", methods=["POST"])
+@auth.login_required
+def react(msg_id):
+    """Toggle an emoji reaction on a message.
+
+    Route: ``POST /react/<msg_id>``
+
+    Requires authentication.  The reaction is **toggled**: if the current
+    user has already reacted with this emoji, the reaction is removed;
+    otherwise it is added.
+
+    **Storage:**
+
+    Reactions live in the ``reactions`` table of the shared message database,
+    keyed by the real message ``id``.  Toggling is a single atomic insert or
+    delete on one ``(message_id, emoji, reactor)`` row — no per-user fan-out
+    and no read-modify-write race.
+
+    **Propagation:**
+
+    After toggling, the function bumps the ``reactions_ts`` column on the
+    message row.  This causes the change query (:func:`messages_since`) to
+    return the row again to every viewer, and the client re-fetches the
+    current reactions from the response.
+
+    Form fields:
+        **reaction** (str): The emoji name (SVG filename without extension)
+        to toggle.  Must be a member of :data:`VALID_REACTIONS`.
+
+    :param msg_id: The integer ``id`` of the message to react to.
+    :type msg_id: int
+    :returns: JSON object mapping emoji names to lists of reactors, e.g.
+        ``{"thumbs_up": ["alice", "bob"], "heart": ["charlie"]}``.
+    :rtype: flask.Response (application/json)
+
+    :raises: ``400 invalid reaction`` — if *reaction* is not in
+        :data:`VALID_REACTIONS`.
+    :raises: ``404 not found`` — if *msg_id* does not exist, or the caller may
+        not access its channel.
+    """
+    user = session["user"]
+    reaction = request.form.get("reaction", "").strip()
+
+    if reaction not in VALID_REACTIONS:
+        return "invalid reaction", 400
+
+    db = get_db()
+    row = db.execute(_MSG_LOOKUP_SQL, (msg_id,)).fetchone()
+
+    # A deleted message is a 404 too: the row survives as a tombstone, but from
+    # every caller's point of view the message is gone, and a reaction on one
+    # would only ever be visible to whoever raced the delete.
+    if not row or row["deleted"]:
+        db.close()
+        return _NOT_FOUND, 404
+
+    # The message lives in the shared table, so confirm the caller can actually
+    # see its channel before letting them react — otherwise they could react to
+    # (and thereby probe/intrude on) private channels and DMs they're not in.
+    if not is_valid_channel(row["channel"], user):
+        db.close()
+        return _NOT_FOUND, 404
+
+    # Toggle the reaction on the canonical message row. Reactions key on the real
+    # message id, so this is a single atomic insert/delete — no per-user fan-out
+    # and no read-modify-write race.
+    existing = db.execute(
+        "SELECT 1 FROM reactions WHERE message_id=? AND emoji=? AND reactor=?",
+        (msg_id, reaction, user),
+    ).fetchone()
+
+    if existing:
+        db.execute(
+            "DELETE FROM reactions WHERE message_id=? AND emoji=? AND reactor=?",
+            (msg_id, reaction, user),
+        )
+    else:
+        db.execute(
+            "INSERT INTO reactions (message_id, emoji, reactor) VALUES (?, ?, ?)",
+            (msg_id, reaction, user),
+        )
+
+    # Bump reactions_ts so the polling query re-sends this row to every viewer.
+    db.execute("UPDATE messages SET reactions_ts=? WHERE id=?", (time(), msg_id))
+
+    rx_rows = db.execute(
+        "SELECT emoji, reactor FROM reactions WHERE message_id=?", (msg_id,)
+    ).fetchall()
+    db.commit()
+    db.close()
+
+    reactions = {}
+    for emoji, reactor in rx_rows:
+        reactions.setdefault(emoji, []).append(reactor)
+
+    return jsonify(reactions)
+
+
+def _pins_for_channel(db, channel):
+    """Return *channel*'s pinned messages, most recently pinned first.
+
+    Shared by the :func:`channel_pins` route and the :func:`pin` toggle (which
+    answers with the resulting list so the caller need not re-fetch). Takes an
+    open connection because the toggle already holds one mid-transaction.
+
+    A soft-deleted message is excluded rather than merely hidden: its pin row is
+    left in place so that :func:`delete_message` stays a single ``UPDATE``, and
+    the join here is what makes the pin disappear from every viewer's list at
+    the same moment the message does.
+    """
+    rows = db.execute(
+        "SELECT m.id, m.channel, m.sender, m.content, m.filename, m.ts, "
+        "p.pinned_by, p.pinned_ts "
+        "FROM pins p JOIN messages m ON m.id = p.message_id "
+        "WHERE p.channel = ? AND m.deleted = 0 "
+        "ORDER BY p.pinned_ts DESC "
+        "LIMIT ?",
+        (channel, MAX_PINS_PER_CHANNEL),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "channel": r["channel"],
+            "sender": r["sender"],
+            "content": (r["content"] or "")[:PIN_PREVIEW_CHARS],
+            "filename": r["filename"],
+            "ts": r["ts"],
+            "pinned_by": r["pinned_by"],
+            "pinned_ts": r["pinned_ts"],
+        }
+        for r in rows
+    ]
+
+
+@chat_bp.route("/pins/<channel>", methods=["GET"])
+@auth.login_required
+def channel_pins(channel):
+    """Return the messages pinned in a channel.
+
+    Route: ``GET /pins/<channel>``
+
+    Requires authentication and that the caller may read the channel.  Pins
+    belong to the channel rather than to a user, so every member sees the same
+    list.  Also pushed on the SSE stream as the ``pins`` event, so the client
+    only calls this directly for its first paint.
+
+    Message ``content`` is truncated to :data:`PIN_PREVIEW_CHARS`; the panel
+    renders one line of it and jumps to the real message for the rest.
+
+    :param channel: The channel name or DM identifier.
+    :type channel: str
+    :returns: JSON array of ``{id, channel, sender, content, filename, ts,
+        pinned_by, pinned_ts}`` objects, most recently pinned first.
+    :rtype: flask.Response (application/json)
+
+    :raises: ``403 forbidden`` — if the caller may not access *channel*.
+    """
+    user = session["user"]
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+    db = get_db()
+    pins = _pins_for_channel(db, channel)
+    db.close()
+    return jsonify(pins)
+
+
+@chat_bp.route("/pin/<int:msg_id>", methods=["POST"])
+@auth.login_required
+def pin(msg_id):
+    """Pin or unpin a message in its channel.
+
+    Route: ``POST /pin/<msg_id>``
+
+    Requires authentication.  The pin is **toggled**, and it is channel-wide
+    rather than personal: pinning surfaces the message for everyone in the
+    channel, and any member may unpin — the same permission the channel already
+    grants for adding members or renaming it.  Unlike edit and delete, this is
+    deliberately *not* restricted to the message's author, since the point is to
+    let a channel mark someone else's message as the one that matters.
+
+    **Storage:** one row per pinned message in the ``pins`` table, keyed by the
+    real message ``id``, so the toggle is a single atomic insert or delete with
+    no read-modify-write race (see :func:`react`, which has the same shape).
+
+    **Propagation:** the ``after_request`` signal hook wakes every held-open SSE
+    stream, whose ``pins`` collector re-reads the channel's list — so no
+    ``reactions_ts``-style bump on the message row is needed here.
+
+    :param msg_id: The integer ``id`` of the message to pin or unpin.
+    :type msg_id: int
+    :returns: JSON array of the channel's pins after the toggle, in the same
+        shape :func:`channel_pins` returns.
+    :rtype: flask.Response (application/json)
+
+    :raises: ``404 not found`` — if *msg_id* does not exist, is deleted, or the
+        caller may not access its channel.
+    :raises: ``409 too many pins`` — if the channel already holds
+        :data:`MAX_PINS_PER_CHANNEL` pins.  Unpinning still works at the cap.
+    """
+    user = session["user"]
+
+    db = get_db()
+    row = db.execute(_MSG_LOOKUP_SQL, (msg_id,)).fetchone()
+
+    # A deleted message is a 404 for the same reason it is one in react(): the
+    # row survives as a tombstone, but the message is gone from every caller's
+    # point of view.
+    if not row or row["deleted"]:
+        db.close()
+        return _NOT_FOUND, 404
+
+    channel = row["channel"]
+    # Messages live in one shared table, so confirm the caller can actually see
+    # the channel — otherwise pinning would be a way to probe private channels
+    # and DMs they are not in.
+    if not is_valid_channel(channel, user):
+        db.close()
+        return _NOT_FOUND, 404
+
+    existing = db.execute(
+        "SELECT 1 FROM pins WHERE message_id = ?", (msg_id,)
+    ).fetchone()
+
+    if existing:
+        db.execute("DELETE FROM pins WHERE message_id = ?", (msg_id,))
+    else:
+        # Count before inserting. Checked only on the pin path so that a channel
+        # sitting at the cap can still be unpinned back down to size.
+        count = db.execute(
+            "SELECT COUNT(*) FROM pins WHERE channel = ?", (channel,)
+        ).fetchone()[0]
+        if count >= MAX_PINS_PER_CHANNEL:
+            db.close()
+            return f"too many pins (max {MAX_PINS_PER_CHANNEL})", 409
+        db.execute(
+            "INSERT INTO pins (message_id, channel, pinned_by, pinned_ts)"
+            " VALUES (?, ?, ?, ?)",
+            (msg_id, channel, user, time()),
+        )
+
+    pins = _pins_for_channel(db, channel)
+    db.commit()
+    db.close()
+
+    return jsonify(pins)
+
+
+@chat_bp.route("/last_read/<channel>", methods=["GET"])
+@auth.login_required
+def last_read(channel):
+    """Return the current user's read watermark for a channel.
+
+    Route: ``GET /last_read/<channel>``
+
+    Requires authentication.  This is the same ``read_state.last_read_ts`` row
+    that :func:`mark_read` advances, exposed on its own so the client can learn
+    where the user left off *before* opening the channel moves the watermark
+    forward.  That boundary is what the "New messages" divider is drawn at.
+
+    :param channel: The channel name or DM identifier.
+    :type channel: str
+    :returns: JSON ``{"last_read_ts": <float>}``, or ``null`` for a channel the
+        user has never opened.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+
+    db = get_db()
+    row = db.execute(
+        "SELECT last_read_ts FROM read_state WHERE user = ? AND channel = ?",
+        (user, channel),
+    ).fetchone()
+    db.close()
+
+    return jsonify({"last_read_ts": row["last_read_ts"] if row else None})
+
+
+@chat_bp.route("/mark_read/<channel>", methods=["POST"])
+@auth.login_required
+def mark_read(channel):
+    """Mark all messages in a channel as read for the current user.
+
+    Route: ``POST /mark_read/<channel>``
+
+    Requires authentication.  Called by the client whenever the user switches
+    to a channel or scrolls to the bottom of the message list.
+
+    **How it works:**
+
+    The user's per-``(user, channel)`` read watermark
+    (``read_state.last_read_ts``) is advanced to the timestamp of the newest
+    message in the channel.  Unread counts and read receipts are both derived
+    from this single row, so there is no per-message write.  The watermark only
+    ever moves forward (see :func:`_advance_read`).
+
+    **Read receipts:**
+
+    Other clients read these watermarks via :func:`read_receipts` and derive
+    the per-message ``✓`` checkmarks themselves: a user has read a message iff
+    their watermark is ``>=`` that message's ``ts``.
+
+    :param channel: The channel name or DM identifier.
+    :type channel: str
+    :returns: Empty body with HTTP 204 No Content.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+    db = get_db()
+
+    # Advance the read watermark to the newest message in the channel. Unread
+    # counts and read receipts are both derived from this single per-(user,
+    # channel) row, so there is no per-message write.
+    row = db.execute(
+        "SELECT MAX(ts) AS max_ts FROM messages WHERE channel = ?", (channel,)
+    ).fetchone()
+    if row and row["max_ts"] is not None:
+        _advance_read(db, user, channel, row["max_ts"])
+        db.commit()
+    db.close()
+
+    return "", 204
+
+
+@chat_bp.route("/read_receipts/<channel>", methods=["GET"])
+@auth.login_required
+def read_receipts(channel):
+    """Return each member's read watermark for a channel.
+
+    Route: ``GET /read_receipts/<channel>``
+
+    Requires authentication.  Returns the ``read_state`` watermarks for the
+    channel: one ``last_read_ts`` per user. A user has read a given message iff
+    their watermark is ``>=`` that message's ``ts``, so the client derives the
+    per-message ``✓`` receipts itself from the message timestamps it already
+    holds.
+
+    This keeps the 3-second poll's payload and work proportional to the number
+    of members (O(users)) rather than the channel's full history
+    (O(messages × users)), which is what returning a per-message map would cost.
+
+    :param channel: The channel name or DM identifier.
+    :type channel: str
+    :returns: JSON object mapping each reader's username to their read watermark
+        (epoch seconds), e.g. ``{"alice": 1716000001.4, "bob": 1716000000.1}``.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+    db = get_db()
+    states = db.execute(
+        "SELECT user, last_read_ts FROM read_state WHERE channel = ?", (channel,)
+    ).fetchall()
+    db.close()
+    return jsonify({s["user"]: s["last_read_ts"] for s in states})
+
+
+@chat_bp.route("/users", methods=["GET"])
+@auth.login_required
+def users():
+    """Return a list of all registered users except the current user.
+
+    Route: ``GET /users``
+
+    Requires authentication.  Used by the client to populate the "New DM"
+    autocomplete modal — the list shows all other accounts the user can
+    start a conversation with.
+
+    :returns: JSON array of username strings, excluding the currently
+        logged-in user.
+    :rtype: flask.Response (application/json)
+    """
+    me = session["user"]
+    return jsonify([u for u in all_users() if u != me])
+
+
+@chat_bp.route("/channel_members/<channel>", methods=["GET"])
+@auth.login_required
+def channel_members(channel):
+    """Return the mentionable members of a channel (excluding the caller).
+
+    Route: ``GET /channel_members/<channel>``
+
+    Requires authentication and that the caller is permitted to access the
+    channel.  Used by the client to populate the ``@``-mention autocomplete
+    dropdown: for public channels this is every other registered user, for
+    private channels the other members, and for DMs the other participants.
+
+    :param channel: The channel name, DM identifier, or ``"private:<id>"``.
+    :type channel: str
+    :returns: JSON array of usernames the caller may mention, excluding
+        themselves.
+    :rtype: flask.Response (application/json)
+
+    :raises: ``403 forbidden`` — if the caller may not access the channel.
+    """
+    user = session["user"]
+    if not is_valid_channel(channel, user):
+        return "forbidden", 403
+    return jsonify([m for m in channel_users(channel) if m != user])
+
+
+@chat_bp.route("/link_preview", methods=["GET"])
+@auth.login_required
+def link_preview():
+    """Fetch a link preview card for a URL.
+
+    Route: ``GET /link_preview?url=<url>``
+
+    Requires authentication.  Delegates to
+    :func:`minimost.preview.fetch_preview`, which supports Bitbucket Cloud,
+    Bitbucket Server, and generic OpenGraph previews.
+
+    An empty JSON object ``{}`` is returned if:
+
+    * The ``url`` query parameter is missing or blank.
+    * The URL is a private/internal IP address (SSRF protection).
+    * The URL scheme is not ``http`` or ``https``.
+    * The request fails or times out.
+    * No usable preview data can be extracted.
+
+    Query parameters:
+        **url** (str): The fully-qualified URL to preview.
+
+    :returns: A JSON object describing the preview.  Shape depends on the
+        preview type:
+
+        * **Code preview** (Bitbucket): ``{"type": "code", "filename": ...,
+          "filepath": ..., "language": ..., "first_line_num": ...,
+          "highlight_start": ..., "highlight_end": ..., "code": ...,
+          "total_lines": ..., "url": ...}``
+        * **OpenGraph preview**: ``{"type": "og", "title": ...,
+          "description": ..., "image": ..., "domain": ..., "url": ...}``
+        * **No preview**: ``{}``
+    :rtype: flask.Response (application/json)
+    """
+    # Desktop mode makes no outbound connections: the preview fetcher would
+    # download the referenced page, so it is switched off entirely.
+    if current_app.config.get("DESKTOP_MODE"):
+        return jsonify({})
+    url = request.args.get("url", "").strip()
+    if not url:
+        return jsonify({})
+    return jsonify(preview_mod.fetch_preview(url))
+
+
+@chat_bp.route("/private_channels/create", methods=["POST"])
+@auth.login_required
+@ratelimit.rate_limit("create_channel", by="user")
+def create_private_channel():
+    """Create a new private channel or group.
+
+    Route: ``POST /private_channels/create``
+
+    JSON body: ``{"name": str, "members": [str], "kind": "channel"|"group"}``.
+    The creator is always included as a member regardless of the list provided.
+
+    ``kind`` is optional and defaults to ``"channel"``, so every existing caller
+    (including the legacy frontend) keeps creating role-free private channels
+    exactly as before. With ``"group"`` the creator becomes its ``owner`` and the
+    initial members become ``member``s, which is what enables the
+    owner/admin/member management matrix on the later group routes.
+
+    :returns: JSON ``{"id": int, "channel": str, "name": str, "kind": str}``.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    members = [m.strip() for m in (data.get("members") or []) if str(m).strip()]
+    kind = (data.get("kind") or KIND_CHANNEL).strip().lower()
+    if kind not in (KIND_CHANNEL, KIND_GROUP):
+        return "kind must be 'channel' or 'group'", 400
+
+    # Only meaningful for a group; a legacy channel has no invite policy.
+    invite_only = bool(data.get("invite_admin_only"))
+
+    if not name:
+        return "name required", 400
+
+    if len(name) > MAX_CHANNEL_NAME_LEN:
+        return f"channel name must be {MAX_CHANNEL_NAME_LEN} characters or fewer", 400
+
+    # Only admit usernames that correspond to real accounts, and store them in
+    # the account's own casing. Membership is checked with an exact match
+    # (is_valid_channel), so keeping the submitted casing would enrol a "member"
+    # who can never open the channel: "ALICE" is admitted as real because the
+    # lookup is case-insensitive, then never matches the account "alice".
+    canonical = {u.lower(): u for u in all_users()}
+    members = _dedupe([canonical[m.lower()] for m in members if m.lower() in canonical])
+
+    if user not in members:
+        members.append(user)
+
+    if len(members) > MAX_GROUP_MEMBERS:
+        return f"a group may not start with more than {MAX_GROUP_MEMBERS} members", 400
+
+    now = time()
+    pdb = _get_private_db()
+    try:
+        # Groups get an 8-digit number at creation so it can be shared straight
+        # away; legacy channels have none (they are not meant to be found).
+        group_no = _generate_group_no(pdb) if kind == KIND_GROUP else None
+        invite_admin_only = 1 if (kind == KIND_GROUP and invite_only) else 0
+        cur = pdb.execute(
+            "INSERT INTO private_channels"
+            " (name, created_by, created_ts, kind, group_no, invite_admin_only)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (name, user, now, kind, group_no, invite_admin_only),
+        )
+        channel_id = cur.lastrowid
+        # The creator owns a group; everyone else (and every member of a legacy
+        # channel) is a plain member.
+        rows = [
+            (
+                channel_id,
+                m,
+                now,
+                ROLE_OWNER if (kind == KIND_GROUP and m == user) else ROLE_MEMBER,
+            )
+            for m in members
+        ]
+        pdb.executemany(
+            "INSERT INTO private_channel_members"
+            " (channel_id, username, joined_ts, history_start_ts, role)"
+            " VALUES (?, ?, ?, NULL, ?)",
+            rows,
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    return jsonify(
+        {
+            "id": channel_id,
+            "channel": f"{PRIVATE_CHANNEL_PREFIX}{channel_id}",
+            "name": name,
+            "kind": kind,
+            "group_no": group_no,
+            "invite_admin_only": bool(invite_admin_only),
+        }
+    )
+
+
+@chat_bp.route("/private_channels", methods=["GET"])
+@auth.login_required
+def list_private_channels():
+    """List private channels the current user is a member of.
+
+    Route: ``GET /private_channels``
+
+    :returns: JSON array of ``{"id", "channel", "name", "unread", "members",
+        "kind", "role"}`` objects. ``kind`` is ``"channel"`` or ``"group"`` and
+        ``role`` is the caller's own role in it, so the client can split the
+        sidebar and show management affordances to the right people. Also pushed
+        verbatim as the ``private_channels`` SSE event, so a create, invite,
+        removal, rename, promotion, transfer or disband updates every member's
+        list without a refresh.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+
+    pdb = _get_private_db()
+    rows = pdb.execute(
+        """
+        SELECT pc.id, pc.name, COALESCE(pc.kind, ?) AS kind,
+               COALESCE(pc.invite_admin_only, 0) AS invite_admin_only,
+               pc.group_no,
+               COALESCE(pcm.role, ?) AS role
+        FROM private_channels pc
+        JOIN private_channel_members pcm ON pc.id = pcm.channel_id
+        WHERE pcm.username = ?
+        ORDER BY pc.id
+        """,
+        (KIND_CHANNEL, ROLE_MEMBER, user),
+    ).fetchall()
+
+    if not rows:
+        pdb.close()
+        return jsonify([])
+
+    channel_ids = [row["id"] for row in rows]
+
+    # Groups created before the group_no column existed get their number here, on
+    # first listing, rather than in a data migration.
+    group_numbers = {
+        row["id"]: (row["group_no"] or _ensure_group_no(row["id"], pdb))
+        for row in rows
+        if row["kind"] == KIND_GROUP
+    }
+
+    # Fetch every channel's membership in a single query (ordered by channel and
+    # insertion rowid to preserve per-channel member order) instead of one
+    # round-trip per channel.
+    placeholders = ",".join("?" * len(channel_ids))
+    member_rows = pdb.execute(
+        f"SELECT channel_id, username FROM private_channel_members "  # nosec B608
+        f"WHERE channel_id IN ({placeholders}) ORDER BY channel_id, rowid",
+        channel_ids,
+    ).fetchall()
+    pdb.close()
+    members_by_channel: dict = {}
+    for m in member_rows:
+        members_by_channel.setdefault(m["channel_id"], []).append(m["username"])
+
+    # Unread counts for all of the user's private channels in one grouped query
+    # rather than a COUNT per channel.
+    channel_names = [f"{PRIVATE_CHANNEL_PREFIX}{cid}" for cid in channel_ids]
+    db = get_db()
+    count_rows = db.execute(
+        f"SELECT m.channel AS channel, COUNT(*) AS c FROM messages m "  # nosec B608
+        "LEFT JOIN read_state r ON r.user = ? AND r.channel = m.channel "
+        f"WHERE m.channel IN ({placeholders}) AND m.sender != ? AND m.deleted = 0 "
+        "AND m.ts > COALESCE(r.last_read_ts, 0) "
+        "GROUP BY m.channel",
+        (user, *channel_names, user),
+    ).fetchall()
+    db.close()
+    unread_by_channel = {r["channel"]: r["c"] for r in count_rows}
+
+    result = [
+        {
+            "id": row["id"],
+            "channel": f"{PRIVATE_CHANNEL_PREFIX}{row['id']}",
+            "name": row["name"],
+            "unread": unread_by_channel.get(f"{PRIVATE_CHANNEL_PREFIX}{row['id']}", 0),
+            "members": members_by_channel.get(row["id"], []),
+            "kind": row["kind"],
+            "role": row["role"],
+            "group_no": group_numbers.get(row["id"]),
+            "invite_admin_only": bool(row["invite_admin_only"]),
+        }
+        for row in rows
+    ]
+
+    return jsonify(result)
+
+
+@chat_bp.route("/private_channels/<int:channel_id>/rename", methods=["POST"])
+@auth.login_required
+def rename_private_channel(channel_id):
+    """Rename a private channel or group.
+
+    Route: ``POST /private_channels/<channel_id>/rename``
+
+    JSON body: ``{"name": str}``.
+
+    On a **group** this requires admin or owner; on a legacy private channel any
+    member may still rename it, exactly as before roles existed.
+
+    :returns: ``"ok"`` on success; ``403`` when not permitted, ``404`` when the
+        channel does not exist.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    _role, err = _manage_gate(channel_id, user, need_admin=True)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    if not name:
+        return "name required", 400
+
+    if len(name) > MAX_CHANNEL_NAME_LEN:
+        return f"channel name must be {MAX_CHANNEL_NAME_LEN} characters or fewer", 400
+
+    pdb = _get_private_db()
+    try:
+        pdb.execute("UPDATE private_channels SET name = ? WHERE id = ?", (name, channel_id))
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    _post_system_message(channel_id, f'{user} has renamed the channel to "{name}"')
+
+    return "ok"
+
+
+@chat_bp.route("/private_channels/<int:channel_id>/add_member", methods=["POST"])
+@auth.login_required
+def add_private_channel_member(channel_id):
+    """Add a user to a private channel or group.
+
+    Route: ``POST /private_channels/<channel_id>/add_member``
+
+    JSON body: ``{"username": str}``.  The new member starts fresh — no prior
+    message history is shared — and joins with the ``member`` role.
+
+    On a **group**, inviting is open to every member unless
+    ``group_invite_admin_only`` is enabled in ``settings.json``, in which case
+    only an admin or the owner may invite. On a legacy private channel any
+    member may still add, as before.
+
+    :returns: ``"ok"`` on success; ``404`` unknown user/channel, ``409`` already
+        a member, ``403`` not permitted.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    _role, err = _manage_gate(
+        channel_id, user, need_admin=_invite_admin_only_for(channel_id)
+    )
+    if err:
+        return err
+
+    members = get_private_channel_members(channel_id)
+
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+
+    if not username:
+        return "username required", 400
+    # Resolve to the account's own casing before storing: membership is matched
+    # exactly, so enrolling "Alice" for the account "alice" would add a member
+    # who can never open the channel (see _canonical_username).
+    username = _canonical_username(username)
+    if not username:
+        return "user not found", 404
+    if username in members:
+        return "already a member", 409
+    if len(members) >= MAX_GROUP_MEMBERS:
+        return f"a group may not exceed {MAX_GROUP_MEMBERS} members", 409
+
+    now = time()
+
+    pdb = _get_private_db()
+    try:
+        pdb.execute(
+            "INSERT OR IGNORE INTO private_channel_members"
+            " (channel_id, username, joined_ts, history_start_ts, role)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (channel_id, username, now, now, ROLE_MEMBER),
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    _post_system_message(channel_id, f"{user} added {username} to this channel")
+
+    return "ok"
+
+
+@chat_bp.route("/private_channels/<int:channel_id>/leave", methods=["POST"])
+@auth.login_required
+def leave_private_channel(channel_id):
+    """Remove the current user from a private channel or group.
+
+    Route: ``POST /private_channels/<channel_id>/leave``
+
+    A system message announcing the departure is inserted for the remaining
+    members. If the leaver is the last member the room is kept (not deleted),
+    matching upstream behaviour.
+
+    On a **group**, the owner may not simply leave: doing so would strand the
+    group with nobody able to manage it, so the request is refused with ``409``
+    until ownership is transferred (or the group disbanded). An admin or member
+    leaves freely.
+
+    :returns: ``"ok"`` on success; ``403`` when not a member, ``404`` when the
+        channel does not exist, ``409`` when the group owner tries to leave.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    kind = _channel_kind(channel_id)
+    if kind is None:
+        return "channel not found", 404
+
+    members = get_private_channel_members(channel_id)
+    if user not in members:
+        return "forbidden", 403
+
+    if kind == KIND_GROUP and _member_role(channel_id, user) == ROLE_OWNER:
+        return "owner must transfer ownership before leaving", 409
+
+    pdb = _get_private_db()
+    try:
+        pdb.execute(
+            "DELETE FROM private_channel_members WHERE channel_id = ? AND username = ?",
+            (channel_id, user),
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    remaining = [m for m in members if m != user]
+    if remaining:
+        _post_system_message(channel_id, f"{user} has left the channel")
+
+    return "ok"
+
+
+@chat_bp.route("/private_channels/<int:channel_id>/members", methods=["GET"])
+@auth.login_required
+def private_channel_members_route(channel_id):
+    """List members of a private channel.
+
+    Route: ``GET /private_channels/<channel_id>/members``
+
+    :returns: JSON array of ``{"username": str}`` objects.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    members = get_private_channel_members(channel_id)
+    if user not in members:
+        return "forbidden", 403
+    return jsonify([{"username": m} for m in members])
+
+
+@chat_bp.route("/groups/<int:channel_id>/members", methods=["GET"])
+@auth.login_required
+def group_members(channel_id):
+    """List a group's members with their roles and profile details.
+
+    Route: ``GET /groups/<channel_id>/members``
+
+    This is the group-management roster. It deliberately does **not** replace
+    ``GET /private_channels/<id>/members``, which keeps its flat
+    ``[{"username": ...}]`` array contract for the legacy frontend; this route
+    adds the role/display-name information the management UI needs.
+
+    Members are ordered owner, then admin, then member, and within a rank by join
+    order, so the hierarchy renders directly. ``display_name`` is ``null`` when
+    unset (the client falls back to the username).
+
+    :returns: JSON ``{"id", "channel", "name", "kind", "members": [...]}`` where
+        each member is ``{"username", "display_name", "avatar", "role",
+        "joined_ts"}``.
+    :rtype: flask.Response (application/json)
+    """
+    user = session["user"]
+    kind = _channel_kind(channel_id)
+    if kind is None:
+        return "group not found", 404
+    if user not in get_private_channel_members(channel_id):
+        return "forbidden", 403
+
+    pdb = _get_private_db()
+    try:
+        rows = pdb.execute(
+            "SELECT username, COALESCE(role, ?) AS role, joined_ts"
+            " FROM private_channel_members WHERE channel_id = ?"
+            " ORDER BY rowid",
+            (ROLE_MEMBER, channel_id),
+        ).fetchall()
+        name_row = pdb.execute(
+            "SELECT name FROM private_channels WHERE id = ?", (channel_id,)
+        ).fetchone()
+    finally:
+        pdb.close()
+
+    members = [dict(r) for r in rows]
+    members.sort(key=lambda m: -_ROLE_RANK.get(m["role"], _ROLE_RANK[ROLE_MEMBER]))
+
+    # Enrich with display names / avatar presence from auth.db. Reusing the
+    # social helper keeps one definition of "how a profile looks" across the
+    # friend list, search results and group rosters.
+    from .social import _settings_map
+
+    settings = _settings_map([m["username"] for m in members])
+    for m in members:
+        display_name, has_avatar, _colour = settings.get(
+            m["username"], (None, False, None)
+        )
+        m["display_name"] = display_name
+        m["avatar"] = has_avatar
+
+    return jsonify(
+        {
+            "id": channel_id,
+            "channel": f"{PRIVATE_CHANNEL_PREFIX}{channel_id}",
+            "name": name_row["name"] if name_row else None,
+            "kind": kind,
+            "members": members,
+        }
+    )
+
+
+@chat_bp.route("/groups/<int:channel_id>/remove_member", methods=["POST"])
+@auth.login_required
+def group_remove_member(channel_id):
+    """Remove a member from a group (owner/admin only).
+
+    Route: ``POST /groups/<channel_id>/remove_member``
+
+    JSON body: ``{"username": str}``. An admin may remove ordinary members but
+    not another admin or the owner; the owner may remove anyone except
+    themselves (the owner leaves by transferring first, then leaving).
+
+    Message history is retained — removal revokes access, it does not erase the
+    transcript, matching how upstream handles a member leaving.
+
+    :returns: ``"ok"``; ``404`` unknown group/user or not a member, ``403`` not
+        permitted, ``400`` removing yourself, ``409`` the group would be empty.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    if not _group_exists_as_group(channel_id):
+        return "group not found", 404
+    actor_role, err = _manage_gate(channel_id, user, need_admin=True)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    username = _canonical_username((data.get("username") or "").strip())
+    if not username:
+        return "user not found", 404
+    if username == user:
+        return "use leave to remove yourself", 400
+
+    members = get_private_channel_members(channel_id)
+    if username not in members:
+        return "not a member", 404
+
+    target_role = _member_role(channel_id, username) or ROLE_MEMBER
+    # An admin may not remove a peer or the owner.
+    if actor_role != ROLE_OWNER and _ROLE_RANK.get(
+        target_role, _ROLE_RANK[ROLE_MEMBER]
+    ) >= _ROLE_RANK[ROLE_ADMIN]:
+        return "cannot remove an admin or the owner", 403
+
+    pdb = _get_private_db()
+    try:
+        pdb.execute(
+            "DELETE FROM private_channel_members WHERE channel_id = ? AND username = ?",
+            (channel_id, username),
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    _post_system_message(channel_id, f"{user} removed {username} from the group")
+    return "ok"
+
+
+@chat_bp.route("/groups/<int:channel_id>/role", methods=["POST"])
+@auth.login_required
+def group_set_role(channel_id):
+    """Promote a member to admin or demote an admin to member (owner only).
+
+    Route: ``POST /groups/<channel_id>/role``
+
+    JSON body: ``{"username": str, "role": "admin"|"member"}``. Only the owner
+    may change roles, and only between admin and member — ownership moves via
+    the transfer route so there is always exactly one owner.
+
+    :returns: ``"ok"``; ``404`` unknown group/user or not a member, ``403`` not
+        the owner, ``400`` invalid role or self-targeted.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    if not _group_exists_as_group(channel_id):
+        return "group not found", 404
+    _role, err = _manage_gate(channel_id, user, need_owner=True)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    new_role = (data.get("role") or "").strip().lower()
+    if new_role not in (ROLE_ADMIN, ROLE_MEMBER):
+        return "role must be 'admin' or 'member'", 400
+
+    username = _canonical_username((data.get("username") or "").strip())
+    if not username:
+        return "user not found", 404
+    if username == user:
+        return "cannot change your own role", 400
+    if username not in get_private_channel_members(channel_id):
+        return "not a member", 404
+
+    pdb = _get_private_db()
+    try:
+        pdb.execute(
+            "UPDATE private_channel_members SET role = ?"
+            " WHERE channel_id = ? AND username = ?",
+            (new_role, channel_id, username),
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    verb = "promoted" if new_role == ROLE_ADMIN else "demoted"
+    _post_system_message(channel_id, f"{user} {verb} {username} to {new_role}")
+    return "ok"
+
+
+# ── Join by group number ───────────────────────────────────────────────────
+#
+# A group number is meant to be shared, so knowing it is the only credential
+# needed to *ask*. It is never enough to get in: the group's owner or an admin
+# decides, which is exactly the invite policy enforced elsewhere.
+#
+# Why a request table instead of adding the member straight away: an open
+# "number -> membership" path would let anyone with a leaked number fill a group,
+# and it would bypass the invite policy the group explicitly configured.
+
+JOIN_PENDING = "pending"
+JOIN_APPROVED = "approved"
+JOIN_REJECTED = "rejected"
+JOIN_CANCELLED = "cancelled"
+
+# A short note is enough to say "it's me, from the games night".
+MAX_JOIN_NOTE_LEN = 120
+
+# Name search: a page size small enough that browsing cannot harvest the whole
+# directory, and a minimum length so a single letter is not a valid query.
+GROUP_SEARCH_PAGE = 20
+
+GROUP_SEARCH_MIN_CHARS = 2
+
+
+def _group_row_by_number(group_no: str):
+    """Return ``(id, name, kind)`` for the group with this number, or ``None``.
+
+    Only groups: a legacy private channel has no number, and the lookup must not
+    become a way to probe for channels that are meant to be invite-only.
+    """
+    pdb = _get_private_db()
+    try:
+        return pdb.execute(
+            "SELECT id, name, COALESCE(kind, ?) AS kind FROM private_channels"
+            " WHERE group_no = ?",
+            (KIND_CHANNEL, group_no),
+        ).fetchone()
+    finally:
+        pdb.close()
+
+
+def _pending_join_request(channel_id: int, username: str):
+    """Return the caller's pending request for this group, or ``None``."""
+    pdb = _get_private_db()
+    try:
+        return pdb.execute(
+            "SELECT id, created_ts FROM group_join_requests"
+            " WHERE channel_id = ? AND username = ? AND status = ?",
+            (channel_id, username, JOIN_PENDING),
+        ).fetchone()
+    finally:
+        pdb.close()
+
+
+def _notify_user(username: str, text: str) -> None:
+    """Post a system DM to *username*, so an outcome is not just a silent state change.
+
+    Same channel shape as the password-reset notification, so it lands in the
+    existing "system" conversation rather than inventing a second one.
+    """
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO messages (channel, sender, content, content_type, ts)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (f"dm:system:{username}", "system", text, "system", time()),
+        )
+        db.commit()
+        db.close()
+    except Exception:  # noqa: BLE001 - a notification must never fail the decision
+        pass
+
+
+@chat_bp.route("/groups/lookup", methods=["GET"])
+@auth.login_required
+@ratelimit.rate_limit("group_lookup", by="user")
+def group_lookup():
+    """Find a group by its number.
+
+    Route: ``GET /groups/lookup?group_no=12345678``
+
+    Returns only what a person needs to decide whether to ask: the group's name and
+    how many people are in it. Never the member list, never the messages — the
+    number is a handle, not a key.
+
+    :returns: JSON with ``id``, ``name``, ``member_count``, ``already_member``,
+        ``pending``; ``404`` when no group has that number.
+    """
+    user = session["user"]
+    group_no = (request.args.get("group_no") or "").strip()
+    if not group_no.isdigit() or len(group_no) != 8:
+        return "group_no must be 8 digits", 400
+
+    row = _group_row_by_number(group_no)
+    if row is None:
+        return "no group with that number", 404
+
+    members = get_private_channel_members(row["id"])
+    return jsonify(
+        {
+            "id": row["id"],
+            "name": row["name"],
+            "member_count": len(members),
+            "already_member": user in members,
+            "pending": _pending_join_request(row["id"], user) is not None,
+        }
+    )
+
+
+@chat_bp.route("/groups/search", methods=["GET"])
+@auth.login_required
+@ratelimit.rate_limit("group_search", by="user")
+def group_search():
+    """Search discoverable groups by name.
+
+    Route: ``GET /groups/search?q=…&offset=0``
+
+    Only groups whose owner opted in (``discoverable``) are returned. A group that
+    has not opted in is invisible here even though its number still works -- being
+    reachable by a number you were given is not the same as being listed for
+    anyone to browse.
+
+    Matching is a case-insensitive substring over the name, with ``%`` and ``_`` in
+    the query treated literally: without that, a query of ``%`` would match every
+    discoverable group in one request.
+
+    :returns: JSON ``{"items": [...], "next_offset": int | null, "query": str}``
+        with at most ``GROUP_SEARCH_PAGE`` items. ``404`` is not used: an empty
+        result is a normal answer.
+    """
+    user = session["user"]
+    query = (request.args.get("q") or "").strip()
+    if len(query) < GROUP_SEARCH_MIN_CHARS:
+        return f"search needs at least {GROUP_SEARCH_MIN_CHARS} characters", 400
+    if len(query) > MAX_CHANNEL_NAME_LEN:
+        return f"search is limited to {MAX_CHANNEL_NAME_LEN} characters", 400
+
+    try:
+        offset = int(request.args.get("offset") or 0)
+    except ValueError:
+        return "offset must be a number", 400
+    offset = max(0, min(offset, 1000))
+
+    # Escape LIKE's own wildcards so the query is matched literally, then wrap it.
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+
+    pdb = _get_private_db()
+    try:
+        rows = pdb.execute(
+            "SELECT id, name FROM private_channels"
+            " WHERE COALESCE(kind, ?) = ?"
+            " AND COALESCE(discoverable, 0) = 1"
+            " AND name LIKE ? ESCAPE '\\'"
+            " ORDER BY id"
+            " LIMIT ? OFFSET ?",
+            (KIND_CHANNEL, KIND_GROUP, pattern, GROUP_SEARCH_PAGE + 1, offset),
+        ).fetchall()
+
+        has_more = len(rows) > GROUP_SEARCH_PAGE
+        rows = rows[:GROUP_SEARCH_PAGE]
+
+        items = []
+        for row in rows:
+            members = get_private_channel_members(row["id"])
+            items.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "member_count": len(members),
+                    "already_member": user in members,
+                    "pending": _pending_join_request(row["id"], user) is not None,
+                }
+            )
+    finally:
+        pdb.close()
+
+    return jsonify(
+        {
+            "items": items,
+            "next_offset": (offset + GROUP_SEARCH_PAGE) if has_more else None,
+            "query": query,
+        }
+    )
+
+
+@chat_bp.route("/groups/<int:channel_id>/join_request", methods=["POST"])
+@auth.login_required
+@ratelimit.rate_limit("group_join_request", by="user")
+def group_request_join(channel_id):
+    """Ask to join a group by its id (reached through the number lookup).
+
+    Route: ``POST /groups/<channel_id>/join_request`` — optional ``{"note": str}``.
+
+    :returns: ``{"ok": true}`` with 202; ``404`` unknown group, ``409`` already a
+        member or already waiting, ``403`` not a group.
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+    note = (data.get("note") or "").strip()[:MAX_JOIN_NOTE_LEN]
+
+    if _channel_kind(channel_id) != KIND_GROUP:
+        return "not a group", 403
+    if _member_role(channel_id, user) is not None:
+        return "already a member", 409
+    if _pending_join_request(channel_id, user) is not None:
+        return "request already pending", 409
+
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT name FROM private_channels WHERE id = ?", (channel_id,)
+        ).fetchone()
+        pdb.execute(
+            "INSERT INTO group_join_requests (channel_id, username, note, status, created_ts)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (channel_id, user, note, JOIN_PENDING, time()),
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    # Tell the people who can decide, so a request does not sit unseen.
+    for member in get_private_channel_members(channel_id):
+        role = _member_role(channel_id, member)
+        if role in (ROLE_OWNER, ROLE_ADMIN):
+            _notify_user(
+                member,
+                f"{user} 申请加入群组「{row['name']}」（群号见群设置），待审批。",
+            )
+
+    audit.log_event("group_join_request", "success", user=user, detail=f"group {channel_id}")
+    return jsonify({"ok": True}), 202
+
+
+@chat_bp.route("/groups/join_requests", methods=["GET"])
+@auth.login_required
+def group_join_requests():
+    """List join requests, both directions.
+
+    Route: ``GET /groups/join_requests``
+
+    ``incoming`` is what the caller may decide: pending requests for every group
+    where they are owner or admin. ``outgoing`` is the caller's own recent
+    requests, so the UI can show "waiting" without polling each group.
+
+    :returns: JSON ``{"incoming": [...], "outgoing": [...]}``.
+    """
+    user = session["user"]
+    pdb = _get_private_db()
+    try:
+        managed = pdb.execute(
+            "SELECT channel_id FROM private_channel_members"
+            " WHERE username = ? AND COALESCE(role, ?) IN (?, ?)",
+            (user, ROLE_MEMBER, ROLE_OWNER, ROLE_ADMIN),
+        ).fetchall()
+        managed_ids = [row[0] for row in managed]
+
+        incoming = []
+        if managed_ids:
+            placeholders = ",".join("?" * len(managed_ids))
+            rows = pdb.execute(
+                f"SELECT r.id, r.channel_id, r.username, r.note, r.created_ts, pc.name"  # nosec B608
+                f" FROM group_join_requests r"
+                f" JOIN private_channels pc ON pc.id = r.channel_id"
+                f" WHERE r.status = ? AND r.channel_id IN ({placeholders})"
+                f" ORDER BY r.created_ts",
+                (JOIN_PENDING, *managed_ids),
+            ).fetchall()
+            incoming = [
+                {
+                    "id": row["id"],
+                    "channel_id": row["channel_id"],
+                    "group_name": row["name"],
+                    "username": row["username"],
+                    "note": row["note"],
+                    "created_ts": row["created_ts"],
+                }
+                for row in rows
+            ]
+
+        outgoing_rows = pdb.execute(
+            "SELECT r.id, r.channel_id, r.status, r.created_ts, r.decided_ts, pc.name"
+            " FROM group_join_requests r"
+            " LEFT JOIN private_channels pc ON pc.id = r.channel_id"
+            " WHERE r.username = ? ORDER BY r.created_ts DESC LIMIT 20",
+            (user,),
+        ).fetchall()
+        outgoing = [
+            {
+                "id": row["id"],
+                "channel_id": row["channel_id"],
+                "group_name": row["name"] or "(已解散)",
+                "status": row["status"],
+                "created_ts": row["created_ts"],
+                "decided_ts": row["decided_ts"],
+            }
+            for row in outgoing_rows
+        ]
+    finally:
+        pdb.close()
+
+    return jsonify({"incoming": incoming, "outgoing": outgoing})
+
+
+@chat_bp.route("/groups/<int:channel_id>/join_requests/<int:request_id>", methods=["POST"])
+@auth.login_required
+def group_decide_join_request(channel_id, request_id):
+    """Approve or reject a join request.
+
+    Route: ``POST /groups/<channel_id>/join_requests/<request_id>``
+
+    JSON body: ``{"action": "approve" | "reject"}``.
+
+    Approving adds the member with the ``member`` role and a fresh
+    ``history_start_ts``, so they cannot read what was said before they joined —
+    the same rule as an invitation.
+
+    :returns: ``"ok"``; ``403`` for a non-manager, ``404`` unknown request,
+        ``409`` when the group is full or the request was already decided.
+    """
+    user = session["user"]
+    _role, err = _manage_gate(channel_id, user, need_admin=True)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip().lower()
+    if action not in ("approve", "reject"):
+        return "action must be 'approve' or 'reject'", 400
+
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT id, username, status FROM group_join_requests"
+            " WHERE id = ? AND channel_id = ?",
+            (request_id, channel_id),
+        ).fetchone()
+        if row is None:
+            return "request not found", 404
+        if row["status"] != JOIN_PENDING:
+            return "request already decided", 409
+
+        applicant = row["username"]
+        now = time()
+        if action == "approve":
+            members = get_private_channel_members(channel_id)
+            if len(members) >= MAX_GROUP_MEMBERS:
+                return f"a group may not exceed {MAX_GROUP_MEMBERS} members", 409
+            pdb.execute(
+                "INSERT OR IGNORE INTO private_channel_members"
+                " (channel_id, username, joined_ts, history_start_ts, role)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (channel_id, applicant, now, now, ROLE_MEMBER),
+            )
+            status = JOIN_APPROVED
+        else:
+            status = JOIN_REJECTED
+
+        pdb.execute(
+            "UPDATE group_join_requests SET status = ?, decided_by = ?, decided_ts = ?"
+            " WHERE id = ?",
+            (status, user, now, request_id),
+        )
+        pdb.commit()
+        group_name = pdb.execute(
+            "SELECT name FROM private_channels WHERE id = ?", (channel_id,)
+        ).fetchone()
+    finally:
+        pdb.close()
+
+    name = group_name["name"] if group_name else "群组"
+    if status == JOIN_APPROVED:
+        _post_system_message(channel_id, f"{applicant} joined the group")
+        _notify_user(applicant, f"你已获准加入群组「{name}」，可以在群组列表里打开它了。")
+    else:
+        _notify_user(applicant, f"你的入群申请被拒绝：群组「{name}」。")
+
+    audit.log_event(
+        "group_join_decision", status, user=user, detail=f"group {channel_id} applicant {applicant}"
+    )
+    return "ok"
+
+
+@chat_bp.route("/groups/<int:channel_id>/join_requests/<int:request_id>", methods=["DELETE"])
+@auth.login_required
+def group_cancel_join_request(channel_id, request_id):
+    """Withdraw your own pending request.
+
+    Route: ``DELETE /groups/<channel_id>/join_requests/<request_id>``
+
+    Cancelling keeps the row (status ``cancelled``) so the history stays honest and
+    the partial unique index frees up for a future request.
+
+    :returns: ``"ok"``; ``403`` if the request is not yours, ``409`` if decided.
+    """
+    user = session["user"]
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT username, status FROM group_join_requests"
+            " WHERE id = ? AND channel_id = ?",
+            (request_id, channel_id),
+        ).fetchone()
+        if row is None:
+            return "request not found", 404
+        if row["username"] != user:
+            return "forbidden", 403
+        if row["status"] != JOIN_PENDING:
+            return "request already decided", 409
+        pdb.execute(
+            "UPDATE group_join_requests SET status = ?, decided_ts = ? WHERE id = ?",
+            (JOIN_CANCELLED, time(), request_id),
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    return "ok"
+
+
+@chat_bp.route("/groups/<int:channel_id>/settings", methods=["GET"])
+@auth.login_required
+def group_settings(channel_id):
+    """Return a group's settings, for the group settings panel.
+
+    Route: ``GET /groups/<channel_id>/settings``
+
+    Any member may read this: the number is meant to be shared and the member list
+    is already visible to everyone in the group. ``can_manage`` and ``my_role``
+    let the client hide controls the server would refuse anyway.
+
+    :returns: JSON with ``id``, ``name``, ``kind``, ``group_no``,
+        ``invite_admin_only`` (this group's own policy), ``invite_gated_globally``
+        (an operator has tightened every group), ``member_count``, ``owner``,
+        ``my_role`` and ``can_manage``.
+    """
+    user = session["user"]
+    role = _member_role(channel_id, user)
+    if role is None:
+        return "not a member", 403
+
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT name, created_by, COALESCE(kind, ?) AS kind,"
+            " COALESCE(invite_admin_only, 0) AS invite_admin_only,"
+            " COALESCE(discoverable, 0) AS discoverable"
+            " FROM private_channels WHERE id = ?",
+            (KIND_CHANNEL, channel_id),
+        ).fetchone()
+        if not row:
+            return "channel not found", 404
+        member_count = pdb.execute(
+            "SELECT COUNT(*) FROM private_channel_members WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()[0]
+        group_no = _ensure_group_no(channel_id, pdb)
+    finally:
+        pdb.close()
+
+    rank = _ROLE_RANK.get(role, _ROLE_RANK[ROLE_MEMBER])
+    return jsonify(
+        {
+            "id": channel_id,
+            "name": row["name"],
+            "kind": row["kind"],
+            "group_no": group_no,
+            "invite_admin_only": bool(row["invite_admin_only"]),
+            "discoverable": bool(row["discoverable"]),
+            "invite_gated_globally": _group_invite_admin_only(),
+            "member_count": member_count,
+            "owner": row["created_by"],
+            "my_role": role,
+            # Renaming needs admin; changing the invite policy needs the owner.
+            "can_manage": rank >= _ROLE_RANK[ROLE_ADMIN],
+            "can_change_policy": rank >= _ROLE_RANK[ROLE_OWNER],
+        }
+    )
+
+
+@chat_bp.route("/groups/<int:channel_id>/settings", methods=["POST"])
+@auth.login_required
+def save_group_settings(channel_id):
+    """Update a group's name and/or invite policy.
+
+    Route: ``POST /groups/<channel_id>/settings``
+
+    JSON body: any of ``{"name": str, "invite_admin_only": bool}``.
+
+    Permissions follow the group matrix: renaming needs admin or owner (the same
+    rule as ``POST /private_channels/<id>/rename``), changing who may invite needs
+    the owner -- an admin must not be able to lock their peers out of inviting.
+
+    :returns: ``"ok"``; ``403`` for insufficient role, ``400`` for a bad name.
+    """
+    user = session["user"]
+    data = request.get_json(silent=True) or {}
+    wants_name = "name" in data
+    wants_policy = "invite_admin_only" in data
+    wants_discoverable = "discoverable" in data
+    if not (wants_name or wants_policy or wants_discoverable):
+        return "nothing to update", 400
+
+    # Being listed for anyone to find by name is the owner's call, like the invite
+    # policy: it changes who can reach the group.
+    _role, err = _manage_gate(
+        channel_id,
+        user,
+        need_admin=wants_name,
+        need_owner=wants_policy or wants_discoverable,
+    )
+    if err:
+        return err
+
+    updates = []
+    params = []
+    if wants_name:
+        name = (data.get("name") or "").strip()
+        if not name:
+            return "name required", 400
+        if len(name) > MAX_CHANNEL_NAME_LEN:
+            return f"group name must be {MAX_CHANNEL_NAME_LEN} characters or fewer", 400
+        updates.append("name = ?")
+        params.append(name)
+    if wants_policy:
+        updates.append("invite_admin_only = ?")
+        params.append(1 if data.get("invite_admin_only") else 0)
+    if wants_discoverable:
+        updates.append("discoverable = ?")
+        params.append(1 if data.get("discoverable") else 0)
+
+    params.append(channel_id)
+    pdb = _get_private_db()
+    try:
+        pdb.execute(
+            f"UPDATE private_channels SET {', '.join(updates)} WHERE id = ?",  # nosec B608
+            params,
+        )
+        pdb.commit()
+    finally:
+        pdb.close()
+
+    if wants_policy:
+        policy = "only owner/admin may invite" if data.get("invite_admin_only") else "any member may invite"
+        _post_system_message(channel_id, f"{user} changed the invite policy: {policy}")
+    if wants_discoverable:
+        state = "discoverable by name" if data.get("discoverable") else "no longer discoverable by name"
+        _post_system_message(channel_id, f"{user} made this group {state}")
+    if wants_name:
+        _post_system_message(channel_id, f"{user} renamed the group to {params[0]}")
+
+    return "ok"
+
+
+@chat_bp.route("/groups/<int:channel_id>/transfer", methods=["POST"])
+@auth.login_required
+def group_transfer_ownership(channel_id):
+    """Transfer group ownership to another member (owner only).
+
+    Route: ``POST /groups/<channel_id>/transfer``
+
+    JSON body: ``{"username": str}``. Both changes happen in one transaction so
+    the group is never left with zero or two owners: the new owner gains
+    ``owner`` and the previous owner is kept on as an ``admin`` (it can then
+    leave if it wants to).
+
+    :returns: ``"ok"``; ``404`` unknown group/user or not a member, ``403`` not
+        the owner, ``400`` self-transfer.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    if not _group_exists_as_group(channel_id):
+        return "group not found", 404
+    _role, err = _manage_gate(channel_id, user, need_owner=True)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    username = _canonical_username((data.get("username") or "").strip())
+    if not username:
+        return "user not found", 404
+    if username == user:
+        return "already the owner", 400
+    if username not in get_private_channel_members(channel_id):
+        return "not a member", 404
+
+    pdb = _get_private_db()
+    try:
+        # Single transaction: step down and step up together.
+        pdb.execute("BEGIN IMMEDIATE")
+        pdb.execute(
+            "UPDATE private_channel_members SET role = ? WHERE channel_id = ?"
+            " AND username = ?",
+            (ROLE_ADMIN, channel_id, user),
+        )
+        pdb.execute(
+            "UPDATE private_channel_members SET role = ? WHERE channel_id = ?"
+            " AND username = ?",
+            (ROLE_OWNER, channel_id, username),
+        )
+        pdb.execute(
+            "UPDATE private_channels SET created_by = ? WHERE id = ?",
+            (username, channel_id),
+        )
+        pdb.commit()
+    except Exception:
+        pdb.rollback()
+        raise
+    finally:
+        pdb.close()
+
+    _post_system_message(channel_id, f"{user} transferred ownership to {username}")
+    return "ok"
+
+
+@chat_bp.route("/groups/<int:channel_id>", methods=["DELETE"])
+@auth.login_required
+def group_disband(channel_id):
+    """Disband a group (owner only).
+
+    Route: ``DELETE /groups/<channel_id>``
+
+    JSON body: ``{"confirm": "<exact group name>"}`` — the name must match, so a
+    mis-click cannot destroy a group.
+
+    Removes the membership rows and the channel row. The message transcript is
+    deliberately **kept** in the shared messages table (consistent with upstream
+    leaving an emptied room intact, and with retention being the thing that
+    prunes history); once the channel row is gone nobody can resolve
+    ``private:<id>``, so the history is unreachable rather than deleted, and the
+    normal retention/size-cap cleanup reclaims it later.
+
+    :returns: ``"ok"``; ``404`` unknown group, ``403`` not the owner, ``400``
+        confirmation does not match the group name.
+    :rtype: flask.Response
+    """
+    user = session["user"]
+    if not _group_exists_as_group(channel_id):
+        return "group not found", 404
+    _role, err = _manage_gate(channel_id, user, need_owner=True)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    confirm = (data.get("confirm") or "").strip()
+
+    pdb = _get_private_db()
+    try:
+        row = pdb.execute(
+            "SELECT name FROM private_channels WHERE id = ?", (channel_id,)
+        ).fetchone()
+        if not row:
+            return "group not found", 404
+        if confirm != row["name"]:
+            return "confirmation does not match the group name", 400
+
+        pdb.execute("BEGIN IMMEDIATE")
+        pdb.execute(
+            "DELETE FROM private_channel_members WHERE channel_id = ?", (channel_id,)
+        )
+        pdb.execute("DELETE FROM private_channels WHERE id = ?", (channel_id,))
+        pdb.commit()
+    except Exception:
+        pdb.rollback()
+        raise
+    finally:
+        pdb.close()
+
+    return "ok"
+
+
+@chat_bp.route("/", methods=["GET"])
+@auth.login_required
+def index():
+    """Serve the main chat single-page application.
+
+    Route: ``GET /``
+
+    Requires authentication (redirects to ``/login`` otherwise).  Renders
+    the ``chat.html`` Jinja2 template, which contains the full client-side
+    chat interface.  All subsequent data is loaded by the JavaScript
+    polling loop via the JSON API endpoints in this module.
+
+    :returns: A rendered HTML response.
+    :rtype: flask.Response (text/html)
+    """
+    return render_template("chat.html")

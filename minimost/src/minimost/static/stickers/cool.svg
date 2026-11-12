@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="酷">
+  <path d="M18 60c14-18 33-26 50-26 9 0 17 3 23 8l11-9-2 15 2 15-11-9c-6 5-14 8-23 8-17 0-36-8-50-26z" fill="#63d2ff"/>
+  <path d="M36 50h30v10a8 8 0 0 1-8 8h-14a8 8 0 0 1-8-8z" fill="#0b0e14"/>
+  <path d="M66 54h8" stroke="#0b0e14" stroke-width="4"/>
+  <path d="M76 50h10v10a8 8 0 0 1-8 8h-2" fill="#0b0e14"/>
+  <path d="M52 76q9 6 18 0" stroke="#0b0e14" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+</svg>

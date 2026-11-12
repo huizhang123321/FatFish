@@ -1,0 +1,50 @@
+<!doctype html>
+{% from "_assets.html" import stylesheet %}
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Sign Up – MiniMost</title>
+    {{ stylesheet('auth.css') }}
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest') }}">
+</head>
+<body>
+    {% from "_password_fields.html" import password_fields %}
+    <div class="auth-brand">Mini<span style="color:#007acc">Most</span></div>
+    <div class="auth-card">
+        <h2>Create account</h2>
+
+        {% if error %}
+        <div class="auth-error">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" autocomplete="on">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="auth-field">
+                <input id="username" type="text" name="username" placeholder="Username" aria-label="Username" required autocomplete="username" autofocus value="{{ username or '' }}" pattern="[A-Za-z0-9_\-]{1,32}" maxlength="32">
+                <p id="username-message" aria-live="polite"></p>
+                {{ password_fields("Password", "Confirm password") }}
+            </div>
+
+            <p id="password-message" aria-live="polite"></p>
+            <p class="auth-hint">Use your name as your username — this is how others will see and search for you. Letters, numbers, hyphens and underscores only.</p>
+
+            <button id="signup-btn" type="submit" disabled>Sign up</button>
+        </form>
+
+        <p class="auth-footer">
+            Already have an account? <a href="/login">Log in</a>
+        </p>
+    </div>
+    <div class="version-tag"># v{{ app_version }}</div>
+
+    <script src="{{ url_for('static', filename='auth-password-rules.js') }}"></script>
+    <script src="{{ url_for('static', filename='auth-password-field.js') }}"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js');
+      }
+    </script>
+</body>
+</html>

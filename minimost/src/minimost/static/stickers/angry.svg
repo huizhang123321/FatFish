@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="生气">
+  <path d="M18 60c14-18 33-26 50-26 9 0 17 3 23 8l11-9-2 15 2 15-11-9c-6 5-14 8-23 8-17 0-36-8-50-26z" fill="#ff8f6b"/>
+  <path d="M38 46l14 6" stroke="#0b0e14" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M72 46l-14 6" stroke="#0b0e14" stroke-width="3.5" stroke-linecap="round"/>
+  <circle cx="46" cy="58" r="3.5" fill="#0b0e14"/>
+  <circle cx="64" cy="58" r="3.5" fill="#0b0e14"/>
+  <path d="M52 72q8-5 16 0" stroke="#0b0e14" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M84 36q10-6 18 2" stroke="#ff5c4d" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M88 46q10-4 16 4" stroke="#ff5c4d" stroke-width="4" fill="none" stroke-linecap="round"/>
+</svg>

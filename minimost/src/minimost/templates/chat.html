@@ -1,0 +1,3339 @@
+<!DOCTYPE html>
+{% from "_password_fields.html" import password_fields %}
+{% from "_assets.html" import stylesheet %}
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>MiniMost</title>
+    <meta name="description" content="Not skype">
+    {{ stylesheet('styles.css') }}
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest') }}">
+</head>
+<body>
+
+<!-- expose current user to JS -->
+<script>
+    const CURRENT_USER = "{{ session.user }}";
+    const MAX_UPLOAD_MB = {{ max_upload_mb }};
+    const MAX_AVATAR_MB = {{ max_avatar_mb }};
+    const MAX_MESSAGE_CHARS = {{ max_message_chars }};
+    const STUN_PORT = {{ stun_port }};
+    const CSRF_TOKEN = "{{ csrf_token() }}";
+</script>
+
+<button id="sidebar-backdrop" aria-label="Close sidebar" onclick="closeSidebar()"></button>
+<nav id="sidebar" aria-label="Channels and direct messages">
+    <div id="sidebar-static">
+        <button id="new-dm-btn" class="icon-btn" title="Start new direct message">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+  <path d="M0 1a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H3.5L0 16V1z"/>
+  <path d="M2 2h10v8H2V2z"/>
+            </svg>
+            <span class="icon-text">New DM</span>
+        </button>
+        <hr>
+    </div>
+
+    <div id="sidebar-dynamic"></div>
+</nav>
+
+<main id="main">
+    <div id="topbar">
+        <div id="topbar-user">
+            <button id="account-btn" class="icon-btn" title="Account" aria-label="Account" onclick="openAccount()">
+                <span id="account-avatar"></span>
+            </button>
+            <button id="help-btn" class="icon-btn" title="Help menu" aria-label="Help">?</button>
+            <button class="icon-btn" title="Settings" onclick="openSettings()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
+                    <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.892 3.433-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.892-1.64-.901-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.474l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115l.094-.319z"/>
+                </svg>
+            </button>
+        </div>
+
+        <div id="topbar-actions">
+            <button id="topbar-share-btn" class="icon-btn" style="display:none" title="Share screen" onclick="toggleStandaloneScreenShare()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M0 4s0-2 2-2h12s2 0 2 2v6s0 2-2 2h-4c0 .667.083 1.167.25 1.5H11a.5.5 0 0 1 0 1H5a.5.5 0 0 1 0-1h.75c.167-.333.25-.833.25-1.5H2s-2 0-2-2zm1.398-.855A1.002 1.002 0 0 0 1 4v6c0 .255.098.292.412.637C1.574 10.89 1.851 11 2 11h12c.149 0 .426-.11.588-.363C14.902 10.292 15 10.255 15 10V4c0-.255-.098-.292-.412-.637C14.426 3.11 14.149 3 14 3H2c-.149 0-.426.11-.588.363z"/>
+                </svg>
+            </button>
+            <button id="call-btn" class="icon-btn" style="display:none" title="Start call" onclick="startCall()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M1.885.511a1.745 1.745 0 0 1 2.61.163L6.29 2.98c.329.423.445.974.315 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.315l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/>
+                </svg>
+            </button>
+            <div id="topbar-search">
+                <svg class="topbar-search-icon" xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242 1.106a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"/>
+                </svg>
+                <input type="text" id="msg-search-input" placeholder="Search messages…" aria-label="Search messages" autocomplete="off">
+                <div id="msg-search-panel">
+                    <div class="search-filters">
+                        <label class="search-filter">
+                            <span>From</span>
+                            <div class="input-suggest-wrap search-from-wrap">
+                                <input type="text" id="msg-search-from" placeholder="anyone" autocomplete="off">
+                                <div id="msg-search-from-suggestions" class="autocomplete-suggestions"></div>
+                            </div>
+                        </label>
+                        <label class="search-filter">
+                            <span>Channel</span>
+                            <select id="msg-search-channel">
+                                <option value="">All channels</option>
+                            </select>
+                        </label>
+                        <label class="search-filter">
+                            <span>After</span>
+                            <input type="date" id="msg-search-start">
+                        </label>
+                        <label class="search-filter">
+                            <span>Before</span>
+                            <input type="date" id="msg-search-end">
+                        </label>
+                    </div>
+                    <div id="msg-search-results"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="topbar-channel">
+            <button id="hamburger-btn" class="icon-btn" title="Toggle sidebar" onclick="toggleSidebar()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M2.5 12a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm0-4a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5z"/>
+                </svg>
+            </button>
+            <button id="members-btn" class="icon-btn" title="Members" onclick="openUsersModal()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8zm-7.978-1A.261.261 0 0 1 7 12.996c.001-.264.167-1.03.76-1.72C8.312 10.629 9.282 10 11 10c1.717 0 2.687.63 3.24 1.276.593.69.758 1.457.76 1.72l-.008.002-.014.002H7.022zM11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm3-2a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM6.936 9.28a5.88 5.88 0 0 0-1.23-.247A7.35 7.35 0 0 0 5 9c-4 0-5 3-5 4 0 .667.333 1 1 1h4.216A2.238 2.238 0 0 1 5 13c0-1.01.377-2.042 1.09-2.904.243-.294.526-.569.846-.816zM4.92 10A5.493 5.493 0 0 0 4 13H1c0-.26.164-1.03.76-1.724.545-.636 1.492-1.256 3.16-1.275zM1.5 5.5a3 3 0 1 1 6 0 3 3 0 0 1-6 0zm3-2a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/>
+                </svg>
+                <span id="members-count" class="icon-text"></span>
+            </button>
+            <div id="topbar-pins">
+                <button id="pins-btn" class="icon-btn" style="display:none" title="Pinned messages" aria-label="Pinned messages" aria-expanded="false" onclick="togglePinsPanel()">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/>
+                    </svg>
+                    <span id="pins-count" class="icon-text"></span>
+                </button>
+                <div id="pins-panel">
+                    <div id="pins-panel-head">Pinned messages</div>
+                    <div id="pins-list"></div>
+                </div>
+            </div>
+            <span class="chan-hash">#</span><span id="chan"></span>
+            <span id="vim-mode-indicator">-- visual --</span>
+        </div>
+    </div>
+
+    <!-- Private channel name bar -->
+    <div id="private-ch-name-bar" style="display:none;">
+        <span id="private-ch-name-bar-text"></span>
+        <button id="private-ch-rename-btn" class="icon-btn" onclick="openRenameChannel()" title="Rename channel" aria-label="Rename channel">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168l10-10zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207 11.207 2.5zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325z"/>
+            </svg>
+        </button>
+    </div>
+
+    <!-- Shown when channel members are sharing their screens (one row per state:
+         other people sharing, and/or you sharing) -->
+    <div id="screenshare-banner" style="display:none;">
+        <span class="ss-live-dot" aria-hidden="true"></span>
+        <div id="screenshare-banner-avatars" class="ss-banner-avatars"></div>
+        <span id="screenshare-banner-text"></span>
+        <button id="screenshare-banner-view-btn" class="ss-banner-btn primary" onclick="openShareViewer()">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M16 8s-3-5.5-8-5.5S0 8 0 8s3 5.5 8 5.5S16 8 16 8zM1.173 8a13.133 13.133 0 0 1 1.66-2.043C4.12 4.668 5.88 3.5 8 3.5c2.12 0 3.879 1.168 5.168 2.457A13.133 13.133 0 0 1 14.828 8c-.058.087-.122.183-.195.288-.335.48-.83 1.12-1.465 1.755C11.879 11.332 10.119 12.5 8 12.5c-2.12 0-3.879-1.168-5.168-2.457A13.134 13.134 0 0 1 1.172 8z"/>
+                <path d="M8 5.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4.5 8a3.5 3.5 0 1 1 7 0 3.5 3.5 0 0 1-7 0z"/>
+            </svg>
+            Watch
+        </button>
+        <button id="screenshare-banner-stop-btn" class="ss-banner-btn danger" style="display:none" onclick="toggleStandaloneScreenShare()">Stop sharing</button>
+    </div>
+
+    <!-- A call already under way in this channel. Ringing only reaches people
+         who were there to answer it, so without this a member who missed the
+         30-second ring has no way back in short of asking to be invited. -->
+    <div id="calljoin-banner" style="display:none;">
+        <span class="ss-live-dot" aria-hidden="true"></span>
+        <div id="calljoin-banner-avatars" class="ss-banner-avatars"></div>
+        <span id="calljoin-banner-text"></span>
+        <button id="calljoin-banner-btn" class="ss-banner-btn primary" onclick="joinActiveCall()">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.568 17.568 0 0 0 4.168 6.608 17.569 17.569 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.678.678 0 0 0-.58-.122l-2.19.547a1.745 1.745 0 0 1-1.657-.459L5.482 8.062a1.745 1.745 0 0 1-.46-1.657l.548-2.19a.678.678 0 0 0-.122-.58L3.654 1.328z"/>
+            </svg>
+            Join
+        </button>
+    </div>
+
+    <!-- Shown while the live event stream is down. Without it a dropped server
+         or a flaky link looks exactly like a quiet channel: nothing arrives and
+         nothing says why. role="status" so it is announced once, politely. -->
+    <div id="connection-banner" role="status" hidden>
+        <span class="conn-dot" aria-hidden="true"></span>
+        <span id="connection-banner-text">Connection lost — reconnecting…</span>
+    </div>
+
+    <div id="chat" role="log" aria-live="off" aria-relevant="additions" aria-label="Messages"></div>
+
+    <!-- Zero-height anchor so the pill floats over the bottom of the message
+         list without taking part in the column layout. -->
+    <div id="jump-latest-anchor">
+        <button id="jump-latest" type="button" onclick="jumpToLatest()" hidden>
+            <span id="jump-latest-text">Jump to latest</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+            </svg>
+        </button>
+    </div>
+
+    <div id="typing-indicator"></div>
+
+    <div id="input" class="dropzone">
+        <div id="reply-banner" class="reply-preview hidden">
+            <span>Replying to <strong id="reply-banner-sender"></strong>: <span id="reply-banner-preview"></span></span>
+            <button class="reply-cancel-btn" onclick="cancelReply()" title="Cancel reply">&times;</button>
+        </div>
+        <div id="image-preview"></div>
+        <div id="input-main">
+            <div id="mention-suggestions" class="autocomplete-suggestions"></div>
+            <textarea
+                id="msg"
+                rows="3"
+                placeholder="Type a message to #general…"
+                aria-label="Type a message"
+            ></textarea>
+
+            <input
+                type="file"
+                id="fileInput"
+                aria-label="Attach files"
+                multiple
+                hidden
+            >
+
+            <div id="input-actions">
+                <div id="format-actions">
+                    <button type="button" onclick="formatMsg('**')" class="icon-btn format-btn" title="Bold (Ctrl+B)" aria-label="Bold">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path d="M14 12a4 4 0 0 0 0-8H6v8"/><path d="M15 20a4 4 0 0 0 0-8H6v8Z"/></svg>
+                    </button>
+                    <button type="button" onclick="formatMsg('*')" class="icon-btn format-btn" title="Italic (Ctrl+I)" aria-label="Italic">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><line x1="19" y1="4" x2="10" y2="4"/><line x1="14" y1="20" x2="5" y2="20"/><line x1="15" y1="4" x2="9" y2="20"/></svg>
+                    </button>
+                    <button type="button" onclick="formatMsg('__')" class="icon-btn format-btn" title="Underline (Ctrl+U)" aria-label="Underline">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path d="M6 4v6a6 6 0 0 0 12 0V4"/><line x1="4" y1="20" x2="20" y2="20"/></svg>
+                    </button>
+                    <button type="button" onclick="formatMsg('~~')" class="icon-btn format-btn" title="Strikethrough (Ctrl+S)" aria-label="Strikethrough">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><path d="M16 4H9a3 3 0 0 0-2.83 4"/><path d="M14 12a4 4 0 0 1 0 8H6"/><line x1="4" y1="12" x2="20" y2="12"/></svg>
+                    </button>
+                    <button type="button" onclick="openCodeBlockPicker(event)" id="codeblock-btn" class="icon-btn format-btn" title="Code block" aria-label="Code block">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                    </button>
+                </div>
+                <div id="input-actions-main">
+                <span id="char-count" class="char-count hidden" aria-live="polite"></span>
+                <button type="button" onclick="openEmojiPicker(event)" id="emoji-btn" class="icon-btn" title="Add emoji">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M4.285 9.567a.5.5 0 0 1 .683.183A3.5 3.5 0 0 0 8 11.5c1.495 0 2.674-.978 3.032-1.75a.5.5 0 1 1 .906.422A4.5 4.5 0 0 1 8 12.5a4.5 4.5 0 0 1-3.938-2.25.5.5 0 0 1 .223-.683zM7 6.5C7 7.328 6.552 8 6 8s-1-.672-1-1.5S5.448 5 6 5s1 .672 1 1.5zm4 0c0 .828-.552 1.5-1 1.5s-1-.672-1-1.5S9.448 5 10 5s1 .672 1 1.5z"/></svg>
+                    <span class="icon-text">Emoji</span>
+                </button>
+
+                <button onclick="fileInput.click()" id="attach-btn" class="icon-btn" title="Attach Image">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M18.08,12.42,11.9,18.61a4.25,4.25,0,0,1-6-6l8-8a2.57,2.57,0,0,1,3.54,0,2.52,2.52,0,0,1,0,3.54l-6.9,6.89A.75.75,0,1,1,9.42,14l5.13-5.12a1,1,0,0,0-1.42-1.42L8,12.6a2.74,2.74,0,0,0,0,3.89,2.82,2.82,0,0,0,3.89,0l6.89-6.9a4.5,4.5,0,0,0-6.36-6.36l-8,8A6.25,6.25,0,0,0,13.31,20l6.19-6.18a1,1,0,1,0-1.42-1.42Z"/></svg>
+                    <span class="icon-text">Attach</span>
+                </button>
+
+                <button onclick="send()" id="send-btn" class="icon-btn inactive" title="Send message">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                        <path d="M15.854.146a.5.5 0 0 0-.528-.103l-15 6a.5.5 0 0 0 0 .914l5.5 2.2 2.2 5.5a.5.5 0 0 0 .914 0l6-15a.5.5 0 0 0-.103-.528z"/>
+                    </svg>
+                    <span class="icon-text">Send</span>
+                </button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+</main>
+
+<!-- DM Modal -->
+<!-- Account Modal -->
+<div id="account-modal" class="modal">
+    <div class="modal-content" style="max-width:420px" role="dialog" aria-modal="true" aria-labelledby="account-modal-name">
+
+        <!-- Main account view -->
+        <div id="account-main-view">
+            <div id="account-modal-header">
+                <div id="account-modal-avatar"></div>
+                <div id="account-modal-name">{{ session["user"] }}</div>
+                <button id="account-signout-btn" onclick="window.location='/logout'" title="Sign out of your account">
+                    <span class="account-signout-icon" aria-hidden="true">⏻</span>Sign out
+                </button>
+                <button class="modal-close-x" onclick="closeAccount()" title="Close" aria-label="Close">&#x2715;</button>
+            </div>
+
+            <div class="account-section-label">Set yourself as</div>
+            <div id="account-presence-options">
+                <button type="button" class="account-presence-btn" data-override="auto" onclick="setPresenceOverride('auto')">
+                    <span class="account-presence-dot auto"></span>Automatic
+                </button>
+                <button type="button" class="account-presence-btn" data-override="active" onclick="setPresenceOverride('active')">
+                    <span class="account-presence-dot active"></span>Online
+                </button>
+                <button type="button" class="account-presence-btn" data-override="idle" onclick="setPresenceOverride('idle')">
+                    <span class="account-presence-dot idle"></span>Away
+                </button>
+                <button type="button" class="account-presence-btn" data-override="offline" onclick="setPresenceOverride('offline')">
+                    <span class="account-presence-dot offline"></span>Offline
+                </button>
+            </div>
+
+            <p class="settings-section-title">Avatar</p>
+            <div class="settings-row" style="display:flex;align-items:center;gap:16px">
+                <div id="settings-avatar-preview" style="flex-shrink:0"></div>
+                <div>
+                    <input type="file" id="settings-avatar-file" accept="image/*" aria-label="Upload avatar image" hidden>
+                    <button type="button" class="icon-btn" id="settings-avatar-btn">Upload Image</button>
+                    <div style="margin-top:6px">
+                        <button type="button" class="settings-reset-btn" id="settings-avatar-remove">Remove avatar</button>
+                    </div>
+                </div>
+            </div>
+
+            <p class="settings-section-title">Profile</p>
+            <div class="settings-row">
+                <label for="settings-bio">Bio</label>
+                <textarea id="settings-bio" maxlength="160" rows="3" placeholder="Tell people a little about yourself…"></textarea>
+                <div class="settings-bio-counter"><span id="settings-bio-count">0</span>/160</div>
+            </div>
+
+            <p class="settings-section-title">Appearance</p>
+            <div class="settings-row">
+                <label for="settings-name-color">Name Color</label>
+                <div class="settings-color-preview">
+                    <span id="settings-color-preview-name"></span>
+                </div>
+                <div class="settings-color-controls">
+                    <input type="color" id="settings-name-color">
+                    <button class="settings-reset-btn" id="settings-color-reset">Reset to default</button>
+                </div>
+                <div class="color-swatches" id="color-swatches"></div>
+            </div>
+
+            <div class="modal-actions">
+                <button id="account-save-btn">Save</button>
+                <button type="button" id="account-cancel-btn" onclick="closeAccount()">Cancel</button>
+            </div>
+
+            <p class="settings-section-title">Password</p>
+            <div class="settings-row">
+                <button type="button" class="icon-btn" id="change-password-btn" onclick="showChangePassword()">Change Password</button>
+            </div>
+
+            <div class="settings-danger-zone">
+                <p class="settings-section-title settings-danger-title">Danger Zone</p>
+                <div class="settings-danger-btns">
+                    <button class="settings-danger-btn" onclick="showDeleteConfirm('soft')">
+                        Soft Delete Account
+                    </button>
+                    <button class="settings-danger-btn settings-danger-btn-hard" onclick="showDeleteConfirm('hard')">
+                        Hard Delete Account
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete confirmation view -->
+        <div id="account-delete-view" style="display:none">
+            <h3 id="settings-delete-title" style="margin-top:0">Delete account</h3>
+            <div id="settings-delete-warning" class="settings-delete-warning"></div>
+            <div class="settings-row" style="margin-top:16px">
+                <label for="settings-delete-password">Confirm your password</label>
+                <input type="password" id="settings-delete-password" placeholder="Password" autocomplete="current-password">
+                <div id="settings-delete-error" class="settings-delete-error" style="display:none"></div>
+            </div>
+            <div class="modal-actions" style="margin-top:16px">
+                <button id="settings-delete-confirm-btn" class="settings-danger-btn settings-danger-btn-confirm" onclick="confirmDelete()">Delete My Account</button>
+                <button onclick="cancelDeleteConfirm()">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Change password view -->
+        <div id="account-password-view" style="display:none">
+            <h3 style="margin-top:0">Change password</h3>
+            <form id="change-password-form" autocomplete="off">
+                <div class="auth-field">
+                    <input
+                        id="change-current-password"
+                        type="password"
+                        placeholder="Current password"
+                        aria-label="Current password"
+                        autocomplete="current-password"
+                        maxlength="1024"
+                    >
+                    {{ password_fields("New password", "Confirm new password", with_names=False) }}
+                </div>
+
+                <p id="password-message" aria-live="polite"></p>
+                <div id="change-password-status" class="settings-delete-error" style="display:none"></div>
+
+                <div class="modal-actions" style="margin-top:16px">
+                    <button id="change-password-submit" type="submit" disabled>Change password</button>
+                    <button type="button" onclick="cancelChangePassword()">Cancel</button>
+                </div>
+            </form>
+        </div>
+
+    </div>
+</div>
+
+<div id="dm-modal" class="modal">
+    <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="dm-modal-title">
+        <div class="modal-header">
+            <h3 id="dm-modal-title">Start Direct Message</h3>
+            <button class="modal-close-x" onclick="closeDmModal()" title="Close" aria-label="Close">&#x2715;</button>
+        </div>
+
+        <div class="input-suggest-wrap">
+            <input
+                id="dm-users"
+                placeholder="Enter usernames (comma separated)"
+                aria-label="Enter usernames (comma separated)"
+            />
+            <div id="dm-suggestions" class="autocomplete-suggestions"></div>
+        </div>
+
+        <div class="modal-actions">
+            <button id="dm-start">Start</button>
+            <button id="dm-cancel">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Create Private Channel Modal -->
+<div id="create-private-ch-modal" class="modal">
+    <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="create-private-ch-title">
+        <div class="modal-header">
+            <h3 id="create-private-ch-title">New Private Channel</h3>
+            <button class="modal-close-x" onclick="closeCreatePrivateChannel()" title="Close" aria-label="Close">&#x2715;</button>
+        </div>
+        <label for="private-ch-name">Channel name</label><br>
+        <input type="text" id="private-ch-name" placeholder="e.g. minimost-enjoyers" maxlength="80" style="width:90%; margin-bottom:4px">
+        <div id="private-ch-name-error" style="color:var(--danger,#e53e3e); font-size:0.82em; min-height:1.2em; margin-bottom:6px"></div>
+        <label for="private-ch-members-input">Members</label>
+        <div class="input-suggest-wrap">
+            <input id="private-ch-members-input" placeholder="Enter usernames (comma separated)" autocomplete="off">
+            <div id="private-ch-suggestions" class="autocomplete-suggestions"></div>
+        </div>
+        <div class="modal-actions">
+            <button id="private-ch-create-btn">Create</button>
+            <button id="private-ch-create-cancel">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Rename Private Channel Modal -->
+<div id="rename-private-ch-modal" class="modal">
+    <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="rename-private-ch-title">
+        <div class="modal-header">
+            <h3 id="rename-private-ch-title">Rename Channel</h3>
+            <button class="modal-close-x" onclick="closeRenameChannel()" title="Close" aria-label="Close">&#x2715;</button>
+        </div>
+        <input type="text" id="rename-ch-input" placeholder="New channel name" aria-label="New channel name" maxlength="80" style="width:90%; margin-bottom:4px">
+        <div id="rename-ch-name-error" style="color:var(--danger,#e53e3e); font-size:0.82em; min-height:1.2em; margin-bottom:6px"></div>
+        <div class="modal-actions">
+            <button id="rename-ch-submit-btn">Rename</button>
+            <button id="rename-ch-cancel-btn">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<!-- Settings Modal -->
+<div id="settings-modal" class="modal">
+    <div class="modal-content" style="max-width:420px" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+
+        <div id="settings-main-view">
+            <div class="modal-header">
+                <h3 id="settings-modal-title">Settings</h3>
+                <button class="modal-close-x" onclick="closeSettings()" title="Close" aria-label="Close">&#x2715;</button>
+            </div>
+
+            <p class="settings-section-title">Appearance</p>
+
+            <div class="settings-row">
+                <label for="settings-font-size">Font Size <span id="settings-font-size-label"></span></label>
+                <input type="range" id="settings-font-size" min="11" max="22" step="1">
+            </div>
+
+            <p class="settings-section-title">Messaging</p>
+
+            <div class="settings-row">
+                <label for="settings-enter-key">Enter key</label>
+                <select id="settings-enter-key">
+                    <option value="send">Send message</option>
+                    <option value="newline">New line (use Ctrl+Enter to send)</option>
+                </select>
+            </div>
+
+            <div class="settings-row">
+                <div class="notif-sound-row">
+                    <div class="notif-sound-info">
+                        <svg id="notif-sound-bell" xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2M8 1.918l-.797.161A4.002 4.002 0 0 0 4 6c0 .628-.134 2.197-.459 3.742-.16.767-.376 1.566-.663 2.258h10.244c-.287-.692-.502-1.49-.663-2.258C12.134 8.197 12 6.628 12 6a4.002 4.002 0 0 0-3.203-3.92L8 1.917zM14.22 12c.223.447.481.801.78 1H1c.299-.199.557-.553.78-1C2.68 10.2 3 6.88 3 6c0-2.42 1.72-4.44 4.005-4.901a1 1 0 1 1 1.99 0A5.002 5.002 0 0 1 13 6c0 .88.32 4.2 1.22 6z"/>
+                            <line id="notif-bell-slash" x1="1" y1="15" x2="15" y2="1" stroke="currentColor" stroke-width="2" style="display:none"/>
+                        </svg>
+                        <span>Notification sounds</span>
+                    </div>
+                    <label class="notif-toggle-label" aria-label="Notification sounds">
+                        <input type="checkbox" id="settings-notif-sounds">
+                        <span class="notif-toggle-track"><span class="notif-toggle-thumb"></span></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="settings-row">
+                <div class="notif-sound-row">
+                    <div class="notif-sound-info">
+                        <svg id="native-notif-bell" xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2M8 1.918l-.797.161A4.002 4.002 0 0 0 4 6c0 .628-.134 2.197-.459 3.742-.16.767-.376 1.566-.663 2.258h10.244c-.287-.692-.502-1.49-.663-2.258C12.134 8.197 12 6.628 12 6a4.002 4.002 0 0 0-3.203-3.92L8 1.917zM14.22 12c.223.447.481.801.78 1H1c.299-.199.557-.553.78-1C2.68 10.2 3 6.88 3 6c0-2.42 1.72-4.44 4.005-4.901a1 1 0 1 1 1.99 0A5.002 5.002 0 0 1 13 6c0 .88.32 4.2 1.22 6z"/>
+                            <line id="native-bell-slash" x1="1" y1="15" x2="15" y2="1" stroke="currentColor" stroke-width="2" style="display:none"/>
+                        </svg>
+                        <span>Native OS notifications</span>
+                    </div>
+                    <label class="notif-toggle-label" aria-label="Native OS notifications">
+                        <input type="checkbox" id="settings-native-notif">
+                        <span class="notif-toggle-track"><span class="notif-toggle-thumb"></span></span>
+                    </label>
+                </div>
+                <div id="native-notif-hint" class="notif-perm-hint" style="display:none">Blocked by browser — update site permissions to enable</div>
+            </div>
+
+            <div class="settings-row">
+                <div class="notif-sound-row">
+                    <div class="notif-sound-info">
+                        <svg id="notify-active-window" xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                            <path d="M2.5 4a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1m2-.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0m1.5.5a.5.5 0 1 0 0-1 .5.5 0 0 0 0 1"/>
+                            <path d="M2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2zm12 1a1 1 0 0 1 1 1v1H1V3a1 1 0 0 1 1-1zM1 13V5h14v8a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1"/>
+                            <line id="notify-active-slash" x1="1" y1="15" x2="15" y2="1" stroke="currentColor" stroke-width="2" style="display:none"/>
+                        </svg>
+                        <span>Notify while MiniMost is focused</span>
+                    </div>
+                    <label class="notif-toggle-label" aria-label="Notify while MiniMost is focused">
+                        <input type="checkbox" id="settings-notify-active">
+                        <span class="notif-toggle-track"><span class="notif-toggle-thumb"></span></span>
+                    </label>
+                </div>
+                <div class="notif-setting-hint">Off by default: alerts only fire when MiniMost is in the background</div>
+            </div>
+
+            <div class="modal-actions">
+                <button id="settings-save-btn">Save</button>
+                <button id="settings-cancel-btn">Cancel</button>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- Members Modal (context-aware: public channel / private channel / DM) -->
+<div id="users-modal" class="modal">
+    <div class="modal-content" style="max-width:480px" role="dialog" aria-modal="true" aria-labelledby="users-modal-title">
+        <div class="modal-header">
+            <h3 id="users-modal-title">Members</h3>
+            <button class="modal-close-x" onclick="closeUsersModal()" title="Close">&#x2715;</button>
+        </div>
+        <input id="users-modal-search" type="text" placeholder="Search members…" aria-label="Search members"
+               autocomplete="off" oninput="filterUsersModal(this.value)"
+               style="width:100%;margin-bottom:10px">
+        <div id="users-list"></div>
+
+        <!-- Shown only for private channels the user belongs to -->
+        <div id="users-modal-add" style="display:none">
+            <hr>
+            <h4 style="margin:8px 0">Add Member</h4>
+            <div id="add-member-row">
+                <div class="input-suggest-wrap">
+                    <input type="text" id="add-member-input" placeholder="Username" aria-label="Username" autocomplete="off">
+                    <div id="add-member-suggestions" class="autocomplete-suggestions"></div>
+                </div>
+                <button id="add-member-submit-btn">Add</button>
+            </div>
+        </div>
+
+        <!-- Shown only for private channels the user belongs to -->
+        <div id="users-modal-leave" style="display:none">
+            <hr>
+            <button id="leave-channel-btn" class="settings-danger-btn settings-danger-btn-confirm" style="width:100%" onclick="askLeaveChannel()">Leave channel</button>
+            <!-- Two-step confirm in place of a native confirm(), matching the
+                 account-deletion flow above. -->
+            <div id="leave-channel-confirm" style="display:none">
+                <p id="leave-channel-prompt"></p>
+                <div class="leave-channel-actions">
+                    <button class="settings-danger-btn settings-danger-btn-confirm" onclick="leaveChannel()">Leave</button>
+                    <button id="leave-channel-cancel-btn" onclick="cancelLeaveChannel()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Reaction Picker -->
+<div id="reaction-picker" style="display:none;">
+    <input type="text" id="reaction-search" placeholder="Search reactions…" aria-label="Search reactions" autocomplete="off">
+    <div class="reaction-picker-grid" id="reaction-picker-grid"></div>
+</div>
+
+<!-- Emoji Picker (insert into message box) -->
+<div id="emoji-picker" style="display:none;">
+    <input type="text" id="emoji-search" placeholder="Search emoji…" aria-label="Search emoji" autocomplete="off">
+    <div class="emoji-picker-grid" id="emoji-picker-grid"></div>
+</div>
+
+<!-- Code block language picker (insert fenced block into message box) -->
+<div id="codeblock-picker" style="display:none;">
+    <input type="text" id="codeblock-search" placeholder="Search language…" aria-label="Search language" autocomplete="off">
+    <div class="codeblock-picker-list" id="codeblock-picker-list"></div>
+</div>
+
+<!-- Help Overlay -->
+<div id="help-overlay" class="hidden">
+    <dialog id="help-modal" open aria-labelledby="help-title">
+        <div id="help-head">
+            <button id="help-close" aria-label="Close help">&times;</button>
+            <div id="help-head-row">
+                <h2 id="help-title"><span style="color:#FFFFFF">Mini</span><span style="color:#007acc">Most</span></h2>
+                <input type="search" id="help-filter" placeholder="Filter help…" aria-label="Filter help topics" autocomplete="off">
+            </div>
+            <!-- Jump list, built from the section headings below by chat-modals.js -->
+            <nav id="help-toc" aria-label="Help sections"></nav>
+        </div>
+
+        <div id="help-body">
+        <section class="help-sect">
+        <h3 class="help-section">Messaging</h3>
+        <ul>
+            <li><kbd>Enter</kbd> – Send message</li>
+            <li><kbd>Shift + Enter</kbd> – New line</li>
+            <li><kbd>↑</kbd> – Edit your last message (with the box empty)</li>
+            <li>While editing: <kbd>Ctrl Enter</kbd> saves, <kbd>Esc</kbd> cancels</li>
+            <li>Hover a message to reply, edit, delete, or react with emoji</li>
+            <li>On a touch screen, tap a message to show its actions</li>
+            <li>Edited messages carry an <em>(edited)</em> marker; hover it for the time of the last change</li>
+            <li>A <b>✓</b> on your own message means it has been read by at least one other person</li>
+            <li>Hover over the check to see who has read your message</li>
+            <li>Messages older than the server's retention period are automatically and permanently removed</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Mentions</h3>
+        <ul>
+            <li>Type <kbd>@</kbd> and a few letters to mention someone — <kbd>↑</kbd> <kbd>↓</kbd> pick, <kbd>Enter</kbd> or <kbd>Tab</kbd> accept, <kbd>Esc</kbd> dismisses</li>
+            <li><b>@everyone</b> mentions every member of the channel at once</li>
+            <li>Being mentioned plays a sound and raises a desktop notification, even in a channel you are not looking at</li>
+            <li>Unread mentions collect in a <b>Mentions</b> entry at the top of the sidebar, newest first</li>
+            <li>Click a mention there to jump to it where it was posted; opening the list never marks anything read</li>
+            <li>Mentions leave the list once you have read the channel they came from</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Navigation</h3>
+        <ul>
+            <li><kbd>i</kbd> – Focus message input</li>
+            <li><kbd>o</kbd> – Start new DM</li>
+            <li><kbd>/</kbd> or <kbd>f</kbd> – Search messages</li>
+            <li><kbd>j</kbd> / <kbd>k</kbd> – Scroll down / up</li>
+            <li><kbd>d</kbd> / <kbd>u</kbd> – Scroll down / up (2×)</li>
+            <li><kbd>G</kbd> / <kbd>gg</kbd> – Jump to bottom / top</li>
+            <li><kbd>Ctrl J</kbd> / <kbd>Ctrl K</kbd> – Next / previous channel</li>
+            <li><kbd>Esc</kbd> – Close menus / unfocus input</li>
+            <li><kbd>?</kbd> – Open this help</li>
+            <li>A <b>New messages</b> line marks where you left off in a channel</li>
+            <li><b>Jump to latest</b> appears at the bottom when you have scrolled back; click it to return</li>
+            <li>A banner across the top means the live connection dropped — messages resume on their own once it is back</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Search</h3>
+        <ul>
+            <li><kbd>/</kbd> or <kbd>f</kbd> opens search; <kbd>Esc</kbd> closes it</li>
+            <li>Narrow results with <b>From</b>, <b>Channel</b>, <b>After</b> and <b>Before</b> — they combine with the search text</li>
+            <li><kbd>↑</kbd> <kbd>↓</kbd> move through results, <kbd>Enter</kbd> jumps to the highlighted message in its channel</li>
+            <li>Search covers every channel and DM you can read, however far back it goes</li>
+            <li>Only the 50 newest matches are shown — add a filter to narrow an older search</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Visual Mode</h3>
+        <ul>
+            <li><kbd>v</kbd> – Enter visual mode (highlights most recent message)</li>
+            <li><kbd>j</kbd> / <kbd>↓</kbd> – Move selection to next message</li>
+            <li><kbd>k</kbd> / <kbd>↑</kbd> – Move selection to previous message</li>
+            <li><kbd>d</kbd> – Delete highlighted message (your own only)</li>
+            <li><kbd>c</kbd> – Edit highlighted message (your own only)</li>
+            <li><kbd>o</kbd> – Reply to highlighted message</li>
+            <li><kbd>y</kbd> – Copy highlighted message text to clipboard</li>
+            <li><kbd>e</kbd> – React to highlighted message with emoji</li>
+            <li><kbd>p</kbd> – Pin or unpin highlighted message</li>
+            <li><kbd>Esc</kbd> – Exit visual mode</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Text Formatting</h3>
+        <ul>
+            <li><kbd>Ctrl B</kbd> – Bold · <kbd>Ctrl I</kbd> – Italic</li>
+            <li><kbd>Ctrl U</kbd> – Underline · <kbd>Ctrl S</kbd> – Strikethrough</li>
+            <li>The same marks work by hand: <kbd>**bold**</kbd>, <kbd>*italic*</kbd>, <kbd>__underline__</kbd>, <kbd>~~strikethrough~~</kbd></li>
+            <li>Wrap a snippet in <kbd>`backticks`</kbd> for inline code</li>
+            <li>Three backticks on their own line open and close a code block; add a language (<kbd>```python</kbd>) for syntax highlighting</li>
+            <li>The <b>&lt;/&gt;</b> button in the composer inserts a code block and picks the language for you</li>
+            <li>Every code block gets a <b>Copy</b> button in its top corner</li>
+            <li>Links are detected as you type them — no markup needed</li>
+            <li>A message that is nothing but emoji is shown extra large</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Reactions</h3>
+        <ul>
+            <li>Hover a message and click the smiley to react, or press <kbd>e</kbd> in visual mode</li>
+            <li>Click an existing reaction to add yours to it, click again to take it back</li>
+            <li>Hover a reaction to see who reacted</li>
+            <li>The emoji button in the composer inserts emoji into the message you are writing</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Pinned messages</h3>
+        <ul>
+            <li>Hover a message and click the pin to pin it to the channel, or press <kbd>p</kbd> in visual mode</li>
+            <li>A pin belongs to the channel, not to you — everyone in it sees the same list, and anyone in it can unpin</li>
+            <li>Pin anyone's message, not just your own</li>
+            <li>The pin icon in the channel header shows how many there are; click it for the list, and click any entry to jump to that message</li>
+            <li>A pinned message carries a <b>Pinned by</b> note where it sits in the conversation</li>
+            <li>Unpin from the message itself, or with the <b>×</b> on its row in the list</li>
+            <li>Each channel holds up to 50 pins; deleting a pinned message removes it from the list</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Calls &amp; screen sharing</h3>
+        <ul>
+            <li>Click the phone icon in a DM or private channel header to start a call</li>
+            <li>Accept or decline incoming calls from the notification card</li>
+            <li><b>Invite</b> pulls more people into a call — everyone hears everyone</li>
+            <li>Any number of people can share a screen at once; each share gets its own tile</li>
+            <li>Click a tile to spotlight it, or pin it so the layout stops moving</li>
+            <li><b>Minimize</b> tucks the call into a corner so you can keep chatting</li>
+            <li>Share a screen without calling with the display icon in the header — everyone in the channel gets a <b>Watch</b> banner</li>
+            <li>Missed the ring? A <b>Join</b> banner appears while a call in your channel is still running</li>
+            <li>Stopping your browser's screen capture automatically ends the share</li>
+        </ul>
+        <ul class="help-shortcuts">
+            <li><kbd>M</kbd> – Mute / unmute · <kbd>S</kbd> – Share screen · <kbd>A</kbd> – Invite</li>
+            <li><kbd>V</kbd> – Switch layout · <kbd>F</kbd> – Fullscreen · <kbd>Esc</kbd> – Minimize</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Channels &amp; DMs</h3>
+        <ul>
+            <li>Click <b>+</b> next to Direct Messages to start a DM with one or more people</li>
+            <li>Click <b>×</b> on a DM to hide it from the sidebar — it reappears when a new message arrives</li>
+            <li>Click <b>+</b> next to Channels to create a private invite-only channel</li>
+            <li>Private channel members can add or remove people and rename the channel</li>
+            <li>The people icon in the header lists who is in the channel and how to reach them</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Media &amp; Display</h3>
+        <ul>
+            <li>Paste, drag, or use the paperclip to attach any file type</li>
+            <li>Images display inline; other files appear as a download link</li>
+            <li>Maximum attachment size: {{ max_upload_mb }} MB per file</li>
+            <li>Attachments are periodically deleted to save space; a <em>File deleted</em> label appears in their place</li>
+            <li>Pinch or <kbd>Ctrl + Scroll</kbd> to adjust font size</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Account &amp; Settings</h3>
+        <ul>
+            <li>Click your avatar in the header to open your Account — set your status, edit your profile, or sign out</li>
+            <li>Choose a display name colour from the palette</li>
+            <li>Upload or remove a profile avatar (max {{ max_avatar_mb }} MB)</li>
+            <li>Click the gear icon in the header for Settings (font size, Enter key, notifications)</li>
+            <li>Click the bell icon in the header to mute or unmute notification sounds</li>
+            <li>Alerts stay quiet while MiniMost is the focused window — turn on <em>Notify while MiniMost is focused</em> in Settings to be alerted anyway</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Trusting This Site</h3>
+        <ul>
+            <li>If your browser shows <b>“Not secure”</b>, import MiniMost's certificate authority to fix it — this also lets the installed app hide the address bar.</li>
+            <li>
+                <a href="/ca.pem" download="minimost-ca.pem"
+                   style="display:inline-block;margin:4px 0;padding:6px 12px;background:#007acc;color:#fff;border-radius:4px;text-decoration:none;font-size:13px;">⬇ Download certificate</a>
+            </li>
+            <li><b>Chrome / Edge:</b> open <kbd>chrome://certificate-manager</kbd> → <b>Local certificates</b> → <b>Trusted Certificates</b> → <b>Import</b>, choose the downloaded file, then restart the browser.</li>
+            <li><b>Firefox:</b> Settings → Privacy &amp; Security → Certificates → <b>View Certificates…</b> → <b>Authorities</b> → <b>Import…</b>, then tick <em>Trust this CA to identify websites</em>.</li>
+            <li>You only need to do this once per device — the certificate renews itself automatically and never needs re-importing.</li>
+        </ul>
+        </section>
+
+        <section class="help-sect">
+        <h3 class="help-section">Status Indicators</h3>
+        <ul>
+            <li><span class="help-presence active"></span> <b>Active</b> – Currently using the app</li>
+            <li><span class="help-presence idle"></span> <b>Idle</b> – Away or no recent activity</li>
+            <li><span class="help-presence offline"></span> <b>Offline</b> – Not connected</li>
+            <li>Set your own status by hand from your avatar menu — it sticks until you set it back to automatic</li>
+        </ul>
+        </section>
+
+        <p id="help-empty" hidden>Nothing matches that. Try a different word, or clear the filter.</p>
+        </div>
+    </dialog>
+</div>
+
+<!-- Incoming Call Notification -->
+<div id="call-incoming" style="display:none;">
+    <div class="call-incoming-avatar">
+        <span class="call-incoming-halo" aria-hidden="true"></span>
+        <span class="call-incoming-halo delay" aria-hidden="true"></span>
+        <div id="call-incoming-avatar-slot"></div>
+    </div>
+    <div class="call-incoming-info">
+        <div class="call-incoming-label">
+            <svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" fill="currentColor" viewBox="0 0 16 16" aria-hidden="true">
+                <path fill-rule="evenodd" d="M1.885.511a1.745 1.745 0 0 1 2.61.163L6.29 2.98c.329.423.445.974.315 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.315l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/>
+            </svg>
+            Incoming call
+        </div>
+        <div class="call-incoming-caller" id="call-caller-name"></div>
+        <div class="call-incoming-context" id="call-incoming-context"></div>
+    </div>
+    <div class="call-incoming-actions">
+        <button class="call-btn-reject" onclick="rejectCall()" title="Decline" aria-label="Decline call">
+            <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" fill="currentColor" viewBox="0 0 16 16" class="hangup-glyph">
+                <path fill-rule="evenodd" d="M1.885.511a1.745 1.745 0 0 1 2.61.163L6.29 2.98c.329.423.445.974.315 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.315l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/>
+            </svg>
+        </button>
+        <button class="call-btn-accept" onclick="acceptCall()" title="Accept" aria-label="Accept call">
+            <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" fill="currentColor" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M1.885.511a1.745 1.745 0 0 1 2.61.163L6.29 2.98c.329.423.445.974.315 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.315l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/>
+            </svg>
+        </button>
+    </div>
+</div>
+
+<!-- Read receipt tooltip – fixed-position to escape overflow:hidden on #chat -->
+<div id="receipt-tooltip"></div>
+
+<!-- DM hover card – shown via fixed positioning to escape sidebar overflow -->
+<div id="dm-hover-card">
+    <div id="dm-hover-avatar"></div>
+    <span id="dm-hover-name"></span>
+    <p id="dm-hover-bio"></p>
+</div>
+
+<!-- Standalone Screen Share Viewer Overlay — one tile per active sharer, the
+     selected one on the stage and the rest live in the filmstrip below. -->
+<div id="screenshare-viewer" style="display:none;">
+    <div id="screenshare-viewer-header">
+        <span class="ss-live-badge"><span class="ss-live-dot"></span>Live</span>
+        <span id="screenshare-viewer-label"></span>
+        <!-- The overlay covers the topbar, and with it the only control that
+             stops your own share. Without this you could sit watching someone
+             else's screen with no sign that yours was still being broadcast. -->
+        <button id="ss-viewer-selfshare-btn" class="ss-banner-btn danger" style="display:none" onclick="toggleStandaloneScreenShare()">
+            <span class="ss-live-dot" aria-hidden="true"></span>
+            You’re sharing — Stop
+        </button>
+        <div class="ss-viewer-actions">
+            <button id="ss-viewer-fullscreen-btn" class="ss-viewer-btn" onclick="toggleShareViewerFullscreen()" title="Fullscreen (F)" aria-label="Fullscreen">
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M5.828 10.172a.5.5 0 0 0-.707 0l-4.096 4.096V11.5a.5.5 0 0 0-1 0v3.975a.5.5 0 0 0 .5.5H4.5a.5.5 0 0 0 0-1H1.732l4.096-4.096a.5.5 0 0 0 0-.707zm4.344 0a.5.5 0 0 1 .707 0l4.096 4.096V11.5a.5.5 0 1 1 1 0v3.975a.5.5 0 0 1-.5.5H11.5a.5.5 0 0 1 0-1h2.768l-4.096-4.096a.5.5 0 0 1 0-.707zm0-4.344a.5.5 0 0 0 .707 0l4.096-4.096V4.5a.5.5 0 1 0 1 0V.525a.5.5 0 0 0-.5-.5H11.5a.5.5 0 0 0 0 1h2.768l-4.096 4.096a.5.5 0 0 0 0 .707zm-4.344 0a.5.5 0 0 1-.707 0L1.025 1.732V4.5a.5.5 0 0 1-1 0V.525a.5.5 0 0 1 .5-.5H4.5a.5.5 0 0 1 0 1H1.732l4.096 4.096a.5.5 0 0 1 0 .707z"/>
+                </svg>
+            </button>
+            <button class="ss-viewer-btn close" onclick="closeShareViewer()" title="Stop watching (Esc)" aria-label="Stop watching">
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854z"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div id="screenshare-viewer-stage"></div>
+    <div id="screenshare-viewer-strip"></div>
+</div>
+
+<!-- Active Call Panel -->
+<div id="call-panel" style="display:none;">
+    <div id="call-header">
+        <div id="call-header-id">
+            <span id="call-live-dot" aria-hidden="true"></span>
+            <div id="call-header-text">
+                <div id="call-header-title"></div>
+                <div id="call-header-sub">
+                    <span id="call-status-text">Connecting…</span>
+                    <span class="call-sub-sep">·</span>
+                    <span id="call-timer">0:00</span>
+                    <span class="call-sub-sep">·</span>
+                    <span id="call-people-count">1 person</span>
+                </div>
+            </div>
+        </div>
+        <div id="call-header-faces"></div>
+        <div id="call-header-actions">
+            <button id="call-layout-btn" class="call-header-btn" onclick="cycleCallLayout()" title="Switch layout (V)" aria-label="Switch layout">
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M0 1a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H1a1 1 0 0 1-1-1V1zm9 0a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1V1zm0 9a1 1 0 0 1 1-1h5a1 1 0 0 1 1 1v5a1 1 0 0 1-1 1h-5a1 1 0 0 1-1-1v-5z"/>
+                </svg>
+            </button>
+            <button id="call-fullscreen-btn" class="call-header-btn" onclick="toggleCallFullscreen()" title="Fullscreen (F)" aria-label="Fullscreen">
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M5.828 10.172a.5.5 0 0 0-.707 0l-4.096 4.096V11.5a.5.5 0 0 0-1 0v3.975a.5.5 0 0 0 .5.5H4.5a.5.5 0 0 0 0-1H1.732l4.096-4.096a.5.5 0 0 0 0-.707zm4.344 0a.5.5 0 0 1 .707 0l4.096 4.096V11.5a.5.5 0 1 1 1 0v3.975a.5.5 0 0 1-.5.5H11.5a.5.5 0 0 1 0-1h2.768l-4.096-4.096a.5.5 0 0 1 0-.707zm0-4.344a.5.5 0 0 0 .707 0l4.096-4.096V4.5a.5.5 0 1 0 1 0V.525a.5.5 0 0 0-.5-.5H11.5a.5.5 0 0 0 0 1h2.768l-4.096 4.096a.5.5 0 0 0 0 .707zm-4.344 0a.5.5 0 0 1-.707 0L1.025 1.732V4.5a.5.5 0 0 1-1 0V.525a.5.5 0 0 1 .5-.5H4.5a.5.5 0 0 1 0 1H1.732l4.096 4.096a.5.5 0 0 1 0 .707z"/>
+                </svg>
+            </button>
+            <button id="call-minimize-btn" class="call-header-btn" onclick="toggleCallMinimized()" title="Minimize — keep chatting (Esc)" aria-label="Minimize call">
+                <svg class="mini-down" xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/>
+                </svg>
+                <svg class="mini-up" xmlns="http://www.w3.org/2000/svg" width="15" height="15" fill="currentColor" viewBox="0 0 16 16">
+                    <path fill-rule="evenodd" d="M7.646 4.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1-.708.708L8 5.707l-5.646 5.647a.5.5 0 0 1-.708-.708l6-6z"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <div id="call-body">
+        <!-- Focused screen share / spotlighted person -->
+        <div id="call-stage"></div>
+        <!-- Participant + screen tiles.  Becomes a filmstrip beside the stage. -->
+        <div id="call-participants-grid"></div>
+    </div>
+
+    <div id="call-controls">
+        <button id="call-mute-audio-btn" class="call-ctrl-btn" onclick="toggleAudioMute()" title="Mute (M)" aria-label="Mute microphone">
+            <div id="call-mic-level"></div>
+            <svg class="glyph-on" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M5 3a3 3 0 0 1 6 0v5a3 3 0 0 1-6 0V3z"/>
+                <path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/>
+            </svg>
+            <svg class="glyph-off" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M13 8c0 .564-.094 1.107-.266 1.613l-.814-.814A4.02 4.02 0 0 0 12 8V7a.5.5 0 0 1 1 0v1zm-5 4c.818 0 1.578-.245 2.212-.667l.718.719a4.973 4.973 0 0 1-2.43.923V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 1 0v1a4 4 0 0 0 4 4zm3-9v4.879L5.158 2.037A3.001 3.001 0 0 1 11 3z"/>
+                <path d="M9.486 10.607 5 6.12V8a3 3 0 0 0 4.486 2.607zM1.146 1.146a.5.5 0 0 1 .708 0l14 14a.5.5 0 0 1-.708.708l-14-14a.5.5 0 0 1 0-.708z"/>
+            </svg>
+            <span class="call-ctrl-label">Mic</span>
+        </button>
+        <button id="call-screen-btn" class="call-ctrl-btn" onclick="toggleScreenShare()" title="Share your screen (S)" aria-label="Share screen">
+            <svg class="glyph-on" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M6 12c0 .667-.083 1.167-.25 1.5H5a.5.5 0 0 0 0 1h6a.5.5 0 0 0 0-1h-.75c-.167-.333-.25-.833-.25-1.5h4c.667 0 2-.4 2-2V4c0-1.6-1.333-2-2-2H2C1.333 2 0 2.4 0 4v6c0 1.6 1.333 2 2 2h4z"/>
+            </svg>
+            <svg class="glyph-off" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M5 3.5h6A1.5 1.5 0 0 1 12.5 5v6a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 11V5A1.5 1.5 0 0 1 5 3.5z"/>
+            </svg>
+            <span class="call-ctrl-label">Share</span>
+        </button>
+        <button id="call-invite-btn" class="call-ctrl-btn" onclick="toggleCallInvitePanel()" title="Invite people (A)" aria-label="Invite people">
+            <svg class="glyph-on" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M6 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm4 8c0 1-1 1-1 1H1s-1 0-1-1 1-4 6-4 6 3 6 4zm-1-.004c-.001-.246-.154-.986-.832-1.664C9.516 10.68 8.289 10 6 10c-2.29 0-3.516.68-4.168 1.332-.678.678-.83 1.418-.832 1.664h10z"/>
+                <path fill-rule="evenodd" d="M13.5 5a.5.5 0 0 1 .5.5V7h1.5a.5.5 0 0 1 0 1H14v1.5a.5.5 0 0 1-1 0V8h-1.5a.5.5 0 0 1 0-1H13V5.5a.5.5 0 0 1 .5-.5z"/>
+            </svg>
+            <span class="call-ctrl-label">Invite</span>
+        </button>
+        <div class="call-ctrl-divider" aria-hidden="true"></div>
+        <button id="call-end-btn" class="call-ctrl-btn" onclick="endCall()" title="Leave call" aria-label="Leave call">
+            <svg class="glyph-on hangup-glyph" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="currentColor" viewBox="0 0 16 16">
+                <path fill-rule="evenodd" d="M1.885.511a1.745 1.745 0 0 1 2.61.163L6.29 2.98c.329.423.445.974.315 1.494l-.547 2.19a.678.678 0 0 0 .178.643l2.457 2.457a.678.678 0 0 0 .644.178l2.189-.547a1.745 1.745 0 0 1 1.494.315l2.306 1.794c.829.645.905 1.87.163 2.611l-1.034 1.034c-.74.74-1.846 1.065-2.877.702a18.634 18.634 0 0 1-7.01-4.42 18.634 18.634 0 0 1-4.42-7.009c-.362-1.03-.037-2.137.703-2.877L1.885.511z"/>
+            </svg>
+            <span class="call-ctrl-label">Leave</span>
+        </button>
+    </div>
+
+    <!-- Invite dropdown -->
+    <div id="call-invite-panel" style="display:none;">
+        <div class="call-invite-head">Invite to this call</div>
+        <input id="call-invite-search" type="text" placeholder="Search people…" aria-label="Search users" oninput="filterCallInviteList(this.value)">
+        <div id="call-invite-list"></div>
+    </div>
+</div>
+
+<!-- keyboard handling -->
+<script>
+const fileInput = document.getElementById("fileInput");
+const preview = document.getElementById("image-preview");
+const msgBox = document.getElementById("msg");
+const sendBtn = document.getElementById("send-btn");
+const dropzone = document.getElementById("input");
+
+// Typing indicator — throttled send
+let lastTypingSend = 0;
+let _typingShowing = false;
+msgBox.addEventListener("input", () => {
+    updateSendState();
+    const now = Date.now();
+    if (now - lastTypingSend >= 2000) {
+        lastTypingSend = now;
+        // Fire-and-forget: a dropped typing ping is invisible and self-correcting
+        // (the next keystroke re-sends). Caught so it does not pile up unhandled
+        // rejections in the console on every keystroke while the link is down.
+        fetch(`/typing/${channel}`, { method: "POST" }).catch(() => {});
+    }
+});
+
+// Send button is greyed out until there's something to send
+// (message text or an attached file), and disabled while the message is over
+// the server's length limit (which would otherwise be silently rejected).
+function updateSendState() {
+    const len = msgBox.value.trim().length;
+    const overLimit = len > MAX_MESSAGE_CHARS;
+    const hasContent = len > 0 || pendingFiles.length > 0;
+    sendBtn.classList.toggle("inactive", !hasContent || overLimit);
+    updateCharCount();
+}
+
+// Show a live character counter as the message nears the limit, turning red
+// once it's over. Hidden until ~90% of the limit so it stays out of the way.
+const _CHAR_COUNT_SHOW_AT = Math.floor(MAX_MESSAGE_CHARS * 0.9);
+function updateCharCount() {
+    const counter = document.getElementById("char-count");
+    if (!counter) return;
+    const len = msgBox.value.trim().length;
+    if (len < _CHAR_COUNT_SHOW_AT) {
+        counter.classList.add("hidden");
+        return;
+    }
+    counter.classList.remove("hidden");
+    counter.textContent = `${len} / ${MAX_MESSAGE_CHARS}`;
+    counter.classList.toggle("over-limit", len > MAX_MESSAGE_CHARS);
+}
+
+function fetchTyping() {
+    fetch(`/typing/${channel}`)
+        .then(r => r.ok ? r.json() : [])
+        .then(applyTyping);
+}
+
+// Render the typing indicator from a /typing payload. Shared by the one-shot
+// fetcher above and the SSE "typing" event (chat-events.js).
+function applyTyping(users) {
+            const el = document.getElementById("typing-indicator");
+            const hasUsers = users && users.length > 0;
+
+            if (!hasUsers) {
+                if (_typingShowing) {
+                    _typingShowing = false;
+                    el.classList.remove("typing-in");
+                    el.classList.add("typing-out");
+                    el.addEventListener("animationend", () => {
+                        if (!_typingShowing) {
+                            el.innerHTML = "";
+                            el.classList.remove("typing-out");
+                        }
+                    }, { once: true });
+                }
+                return;
+            }
+
+            const wasShowing = _typingShowing;
+            _typingShowing = true;
+            el.classList.remove("typing-out");
+            el.innerHTML = "";
+
+            if (users.length <= 2) {
+                const avatarGroup = document.createElement("div");
+                avatarGroup.className = "typing-avatars";
+                users.forEach(u => avatarGroup.appendChild(makeAvatarWrap(u, 22, null, false)));
+                el.appendChild(avatarGroup);
+            }
+
+            const textSpan = document.createElement("span");
+            textSpan.className = "typing-text";
+            if (users.length === 1) {
+                textSpan.textContent = `${users[0]} is typing`;
+            } else if (users.length === 2) {
+                textSpan.textContent = `${users[0]} and ${users[1]} are typing`;
+            } else {
+                textSpan.textContent = "Several people are typing";
+            }
+            el.appendChild(textSpan);
+
+            const dots = document.createElement("span");
+            dots.className = "typing-dots";
+            for (let i = 0; i < 3; i++) dots.appendChild(document.createElement("span"));
+            el.appendChild(dots);
+
+            if (!wasShowing) {
+                el.classList.add("typing-in");
+                el.addEventListener("animationend", () => el.classList.remove("typing-in"), { once: true });
+            }
+}
+
+function fetchReadReceipts() {
+    fetch(`/read_receipts/${channel}`)
+        .then(r => r.ok ? r.json() : {})
+        .then(applyReadReceipts);
+}
+
+// Store read watermarks and refresh receipt ticks. Shared by the one-shot
+// fetcher and the SSE "read_receipts" event (chat-events.js).
+function applyReadReceipts(data) {
+    // {user: last_read_ts} watermarks — receipts are derived per message.
+    readReceiptsMap = data;
+    updateReadReceiptUI();
+}
+
+// Repaints the ✓ on messages other people have read. Scans every loaded message
+// by default; pass *roots* (an element, or a list of them) to rescan only part
+// of the list. The default scan is O(loaded messages) and the querySelectorAll
+// alone is ~5ms at a few thousand of them, so callers that already know which
+// nodes changed should say so. Only a change to readReceiptsMap needs the full
+// sweep — new or re-rendered messages just need their own spans painted.
+function updateReadReceiptUI(roots = null) {
+    // A user has read a message iff their watermark reached the message's ts.
+    const watermarks = Object.entries(readReceiptsMap);
+    const spans = [];
+    if (roots === null) {
+        spans.push(...document.querySelectorAll(".read-receipt"));
+    } else {
+        for (const root of (Array.isArray(roots) ? roots : [roots])) {
+            if (!root?.querySelectorAll) continue;
+            if (root.classList?.contains("read-receipt")) spans.push(root);
+            spans.push(...root.querySelectorAll(".read-receipt"));
+        }
+    }
+    spans.forEach(el => {
+        const ts = Number(el.dataset.ts);
+        const names = watermarks
+            .filter(([u, w]) => u !== CURRENT_USER && w >= ts)
+            .map(([u]) => u)
+            .join(", ");
+        if (!names) return;
+        el.textContent = "✓";
+        el.classList.add("seen");
+        el.dataset.receiptNames = `Read by: ${names}`;
+        el.onmouseenter = () => _showReceiptTooltip(el);
+        el.onmouseleave = _hideReceiptTooltip;
+    });
+}
+
+function _showReceiptTooltip(el) {
+    const tip = document.getElementById("receipt-tooltip");
+    tip.textContent = el.dataset.receiptNames;
+    tip.style.visibility = "hidden";
+    tip.style.display = "block";
+    const rect = el.getBoundingClientRect();
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    let left = rect.right - tw;
+    if (left < 4) left = 4;
+    tip.style.left = left + "px";
+    tip.style.top = (rect.top - th - 6) + "px";
+    tip.style.visibility = "visible";
+}
+
+function _hideReceiptTooltip() {
+    document.getElementById("receipt-tooltip").style.display = "none";
+}
+
+// The help dialog (open/close, filter, jump list) lives in chat-modals.js
+// alongside the shared focus handling every overlay in the app now goes
+// through.
+
+// Opens the inline editor on the newest message you can still edit here.
+// The rendered DOM is the source of truth for "can edit": an .edit-btn is
+// emitted only for your own messages, and deleted ones are pulled out of the
+// list entirely, so the last one on the page needs no separate ownership or
+// tombstone check. Returns whether an editor was actually opened.
+function editLastOwnMessage() {
+    const buttons = document.querySelectorAll("#chat .msg:not(.system-msg) .edit-btn");
+    const el = buttons[buttons.length - 1]?.closest(".msg");
+    const msgId = el?.id.replace("msg-", "");
+    if (!msgId) return false;
+    // A second ArrowUp while the editor is already open would reset the caret
+    // to the end of the text the user is part-way through repositioning.
+    if (document.getElementById(`msg-text-${msgId}`)?.dataset.editing === "true") return false;
+    startEdit(msgId);
+    return true;
+}
+
+msgBox.addEventListener("keydown", e => {
+    if (e.key === "Enter") {
+        const enterToSend = localStorage.getItem("enterToSend") !== "false";
+        if (enterToSend ? !e.shiftKey : e.ctrlKey) {
+            e.preventDefault();
+            send();
+        }
+    }
+
+    // Up-arrow on an empty composer edits your last message — the affordance
+    // every other chat client trains. Guarded on the composer being empty so a
+    // multi-line draft still gets normal caret movement, and on there being no
+    // modifier so shortcuts like Shift+Up (select) are untouched. The @mention
+    // dropdown claims ArrowUp in the capture phase and stops propagation, so
+    // this never competes with it.
+    if (
+        e.key === "ArrowUp" &&
+        !msgBox.value &&
+        !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
+        editLastOwnMessage()
+    ) {
+        e.preventDefault();
+    }
+});
+
+// Toolbar buttons mirror the Ctrl+B/I/U/S hotkeys: wrap the current
+// selection (or insert empty markers) using the shared wrapSelection helper.
+function formatMsg(wrapper) {
+    wrapSelection(msgBox, wrapper);
+    msgBox.focus();
+}
+
+// Languages offered in the code block picker. Each entry is [label, fence tag];
+// the tags map to the syntax highlighter in chat-search.js. An empty tag means
+// a plain (unhighlighted) fenced block.
+const CODE_BLOCK_LANGS = [
+    ["Plain text", ""],
+    ["Python", "python"],
+    ["JavaScript", "javascript"],
+    ["TypeScript", "typescript"],
+    ["C", "c"],
+    ["C++", "cpp"],
+    ["Java", "java"],
+    ["Go", "go"],
+    ["Rust", "rust"],
+    ["Bash / Shell", "bash"],
+    ["Makefile", "makefile"],
+    ["CMake", "cmake"],
+    ["Groovy", "groovy"],
+    ["VHDL", "vhdl"],
+    ["Verilog", "verilog"],
+    ["HTML", "html"],
+    ["XML", "xml"],
+    ["JSON", "json"],
+];
+
+// Matches currently shown in the picker, and the keyboard-selected index.
+let codeBlockMatches = [];
+let codeBlockIndex = -1;
+
+function updateCodeBlockHighlight() {
+    const items = document.getElementById("codeblock-picker-list").children;
+    Array.from(items).forEach((el, i) => {
+        el.classList.toggle("active", i === codeBlockIndex);
+        if (i === codeBlockIndex) el.scrollIntoView({ block: "nearest" });
+    });
+}
+
+// Fuzzy-filter the language list, reusing the shared fuzzySearch/highlight
+// helpers (the same ones behind the @mention and message-search finders).
+function filterCodeLangs(query) {
+    const list = document.getElementById("codeblock-picker-list");
+    const q = query.trim();
+    codeBlockIndex = -1;
+
+    codeBlockMatches = q
+        ? CODE_BLOCK_LANGS
+              .map(([label, tag]) => ({ label, tag, result: fuzzySearch(q, label) }))
+              .filter(({ result }) => result !== null)
+              .sort((a, b) => b.result.score - a.result.score)
+        : CODE_BLOCK_LANGS.map(([label, tag]) => ({ label, tag, result: { indices: [] } }));
+
+    list.innerHTML = "";
+    codeBlockMatches.forEach(({ label, tag, result }, idx) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "codeblock-picker-item";
+        item.innerHTML = highlightFuzzyMatch(label, result.indices);
+        // mousedown so the search input doesn't blur before the click lands.
+        item.onmousedown = e => {
+            e.preventDefault();
+            insertCodeBlock(tag);
+        };
+        list.appendChild(item);
+    });
+}
+
+function openCodeBlockPicker(event) {
+    event.stopPropagation();
+    const picker = document.getElementById("codeblock-picker");
+    if (picker.style.display === "block") {
+        closeCodeBlockPicker();
+        return;
+    }
+    closeEmojiPicker();
+    filterCodeLangs("");
+    picker.style.display = "block";
+    const rect = event.currentTarget.getBoundingClientRect();
+    const pw = picker.offsetWidth;
+    const ph = picker.offsetHeight;
+    let left = Math.max(8, Math.min(rect.left, window.innerWidth - pw - 8));
+    // The message box sits at the bottom, so open above the button.
+    let top = rect.top - ph - 6;
+    if (top < 8) top = rect.bottom + 6;
+    picker.style.left = left + "px";
+    picker.style.top = top + "px";
+    const search = document.getElementById("codeblock-search");
+    search.value = "";
+    requestAnimationFrame(() => search.focus());
+}
+
+function closeCodeBlockPicker() {
+    const picker = document.getElementById("codeblock-picker");
+    if (picker) picker.style.display = "none";
+}
+
+// Insert a fenced code block at the cursor, wrapping any selected text, and
+// leave the cursor on the (empty) code line ready to type.
+function insertCodeBlock(lang) {
+    closeCodeBlockPicker();
+    const start = msgBox.selectionStart;
+    const end = msgBox.selectionEnd;
+    const value = msgBox.value;
+    const before = value.slice(0, start);
+    const selected = value.slice(start, end);
+    const after = value.slice(end);
+
+    // Keep the opening/closing fences on their own lines.
+    const leadingNL = before === "" || before.endsWith("\n") ? "" : "\n";
+    const trailingNL = after === "" || after.startsWith("\n") ? "" : "\n";
+
+    const open = leadingNL + "```" + lang + "\n";
+    const close = "\n```" + trailingNL;
+    msgBox.value = before + open + selected + close + after;
+
+    const cursor = before.length + open.length + selected.length;
+    msgBox.selectionStart = msgBox.selectionEnd = cursor;
+    msgBox.focus();
+    updateSendState();
+}
+
+document.addEventListener("click", function (e) {
+    const picker = document.getElementById("codeblock-picker");
+    const btn = document.getElementById("codeblock-btn");
+    if (
+        picker?.style.display === "block" &&
+        !picker.contains(e.target) &&
+        !btn?.contains(e.target)
+    ) {
+        closeCodeBlockPicker();
+    }
+});
+
+const codeBlockSearch = document.getElementById("codeblock-search");
+codeBlockSearch.addEventListener("input", e => filterCodeLangs(e.target.value));
+codeBlockSearch.addEventListener("keydown", e => {
+    const items = document.getElementById("codeblock-picker-list").children;
+    if (!items.length) return;
+    if (e.key === "ArrowDown") {
+        e.preventDefault();
+        codeBlockIndex = (codeBlockIndex + 1) % items.length;
+        updateCodeBlockHighlight();
+    } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        codeBlockIndex = (codeBlockIndex - 1 + items.length) % items.length;
+        updateCodeBlockHighlight();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        insertCodeBlock(codeBlockMatches[Math.max(codeBlockIndex, 0)].tag);
+    } else if (e.key === "Escape") {
+        e.stopPropagation();
+        closeCodeBlockPicker();
+        msgBox.focus();
+    }
+});
+
+document.addEventListener("load", e => {
+    if (e.target.tagName === "IMG") {
+        e.target.classList.add("loaded");
+        // An image settling into its real height is the one way the message
+        // list grows without a DOM mutation, so the observers below can't see
+        // it. It is also the most common: open a channel full of screenshots
+        // and every decode pushes the newest message further out of view.
+        scheduleJumpLatestUpdate();
+    }
+}, true);
+
+msgBox.addEventListener("paste", e => {
+    const items = e.clipboardData?.items || [];
+    const files = [];
+
+    for (const item of items) {
+        if (item.kind === "file") {
+            const f = item.getAsFile();
+            if (f) files.push(f);
+        }
+    }
+
+    if (files.length) {
+        e.preventDefault();
+        addFiles(files);
+    }
+});
+
+fileInput.addEventListener("change", () => {
+    addFiles([...fileInput.files]);
+    fileInput.value = "";
+});
+
+dropzone.addEventListener("dragover", e => {
+    e.preventDefault();
+    dropzone.classList.add("dragover");
+});
+
+dropzone.addEventListener("dragleave", () => {
+    dropzone.classList.remove("dragover");
+});
+
+dropzone.addEventListener("drop", e => {
+    e.preventDefault();
+    dropzone.classList.remove("dragover");
+
+    addFiles(e.dataTransfer.files);
+});
+
+document.addEventListener("keydown", e => userInput(e));
+
+// Core state
+let channel = "general";
+// Setter so other script files can update the current channel without writing
+// to this cross-file global directly (keeps `channel` an explicit `let` here).
+function setChannel(c) { channel = c; }
+let lastTs = 0;
+let unread = new Set();
+let lastRenderedDate = null;
+let forceScrollToBottom = false;
+let pendingFiles = [];
+
+// In-progress compose state, keyed by channel. The composer used to be left
+// untouched across a switch, so a half-written message (or a staged
+// attachment) followed the user into whatever channel they opened next —
+// close enough to the Send button that a private draft could land in a public
+// channel. Each conversation now keeps its own draft.
+const channelDrafts = new Map();
+
+function saveDraft(ch) {
+    if (!ch) return;
+    const text = msgBox.value;
+    if (!text && pendingFiles.length === 0 && currentReplyId === null) {
+        channelDrafts.delete(ch);
+        return;
+    }
+    channelDrafts.set(ch, {
+        text,
+        files: [...pendingFiles],
+        replyId: currentReplyId,
+    });
+}
+
+function restoreDraft(ch) {
+    // Always reset first: without a saved draft the composer must come up
+    // empty, not carrying the previous channel's contents.
+    msgBox.value = "";
+    pendingFiles = [];
+    preview.innerHTML = "";
+
+    const draft = channelDrafts.get(ch);
+    if (draft) {
+        msgBox.value = draft.text;
+        if (draft.files.length) addFiles(draft.files);
+        if (draft.replyId !== null) startReply(draft.replyId);
+    }
+    updateCharCount();
+    updateSendState();
+}
+
+globalThis.fetchController = null;
+let privateChannelMap = {};
+let privateChannelMembers = {};
+let readReceiptsMap = {};
+// Suppresses mention notifications during the initial bulk load of a channel
+// (page load or channel switch), so old @mentions in history don't re-alert.
+// Armed after the first poll response for the current channel completes.
+let mentionNotifyArmed = false;
+
+// Preview Renderer
+function addFiles(files) {
+    for (const file of files) {
+        if (file.size > MAX_UPLOAD_MB * 1024 * 1024) {
+            showToast(`"${file.name}" exceeds the ${MAX_UPLOAD_MB} MB upload limit.`);
+            continue;
+        }
+
+        pendingFiles.push(file);
+
+        const div = document.createElement("div");
+        div.className = "preview-img";
+
+        const btn = document.createElement("button");
+        btn.textContent = "×";
+        btn.className = "remove-img";
+        btn.onclick = () => {
+            pendingFiles = pendingFiles.filter(f => f !== file);
+            div.remove();
+            updateSendState();
+        };
+
+        if (file.type.startsWith("image/")) {
+            const img = document.createElement("img");
+            img.src = URL.createObjectURL(file);
+            div.appendChild(img);
+        } else {
+            const card = document.createElement("div");
+            card.className = "file-preview-card";
+
+            const icon = document.createElement("img");
+            icon.className = "file-type-icon";
+            icon.src = `/static/file-icons/${fileIconFor(file.name)}.svg`;
+            icon.alt = "";
+
+            const meta = document.createElement("div");
+            meta.className = "file-meta";
+
+            const nm = document.createElement("span");
+            nm.className = "file-name";
+            nm.textContent = file.name;
+
+            const sz = document.createElement("span");
+            sz.className = "file-size";
+            sz.textContent = formatBytes(file.size);
+
+            meta.appendChild(nm);
+            meta.appendChild(sz);
+            card.appendChild(icon);
+            card.appendChild(meta);
+            div.appendChild(card);
+        }
+
+        div.appendChild(btn);
+        preview.appendChild(div);
+    }
+    updateSendState();
+}
+
+// File-deleted detection
+const _fileExistsCache = new Map();
+const _fileSizeCache = new Map();
+
+// Map a file's extension (or special filename) to a bundled file-type logo
+// under /static/file-icons/. Unknown types fall back to a generic glyph.
+const FILE_ICON_EXT = {
+    py: "python", pyw: "python", pyi: "python",
+    cpp: "cplusplus", cxx: "cplusplus", cc: "cplusplus", hpp: "cplusplus", hh: "cplusplus",
+    c: "c", h: "c",
+    cmake: "cmake",
+    js: "javascript", mjs: "javascript", cjs: "javascript",
+    ts: "typescript", tsx: "typescript",
+    html: "html5", htm: "html5",
+    css: "css3",
+    md: "markdown", markdown: "markdown",
+    sh: "bash", bash: "bash", zsh: "bash",
+    rs: "rust",
+    go: "go",
+    java: "java",
+    rb: "ruby",
+    php: "php",
+    json: "json",
+    yml: "yaml", yaml: "yaml",
+    vhd: "vhdl", vhdl: "vhdl",
+    v: "vhdl", vh: "vhdl", sv: "vhdl", svh: "vhdl",
+    groovy: "groovy", gradle: "gradle",
+    mk: "make", make: "make",
+};
+const FILE_ICON_NAME = {
+    "cmakelists.txt": "cmake",
+    "dockerfile": "docker",
+    "makefile": "make",
+    "gnumakefile": "make",
+};
+
+function fileIconFor(name) {
+    const lower = name.toLowerCase();
+    // Prefix-matched families (e.g. Jenkinsfile, Jenkinsfile.prod, Makefile.inc).
+    if (lower.startsWith("jenkinsfile")) return "jenkins";
+    if (lower.startsWith("makefile")) return "make";
+    if (FILE_ICON_NAME[lower]) return FILE_ICON_NAME[lower];
+    const dot = lower.lastIndexOf(".");
+    const ext = dot >= 0 ? lower.slice(dot + 1) : "";
+    return FILE_ICON_EXT[ext] || "generic";
+}
+
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes)) return "";
+    if (bytes < 1024) return bytes + " B";
+    const units = ["KB", "MB", "GB", "TB"];
+    let i = -1;
+    do { bytes /= 1024; i++; } while (bytes >= 1024 && i < units.length - 1);
+    return (bytes < 10 ? bytes.toFixed(1) : Math.round(bytes)) + " " + units[i];
+}
+
+function _markFileDeleted(linkEl) {
+    const span = document.createElement("span");
+    span.className = "file-deleted";
+    span.textContent = "File deleted";
+    linkEl.replaceWith(span);
+}
+
+function _checkDeletedFiles(msgEl) {
+    msgEl.querySelectorAll("a.file-download[data-fn]").forEach(link => {
+        const fn = link.dataset.fn;
+        const applySize = size => {
+            if (!Number.isFinite(size)) return;
+            const sizeEl = link.querySelector(".file-size");
+            if (sizeEl) sizeEl.textContent = formatBytes(size);
+        };
+        if (_fileExistsCache.has(fn)) {
+            if (!_fileExistsCache.get(fn)) _markFileDeleted(link);
+            else applySize(_fileSizeCache.get(fn));
+            return;
+        }
+        fetch(`/files/${fn}`, { method: "HEAD" })
+            .then(r => {
+                _fileExistsCache.set(fn, r.ok);
+                if (!r.ok) { _markFileDeleted(link); return; }
+                const len = parseInt(r.headers.get("Content-Length"), 10);
+                _fileSizeCache.set(fn, len);
+                applySize(len);
+            })
+            .catch(() => {});
+    });
+}
+
+// User color
+
+function userColor(name) {
+    if (userColorOverrides[name]) return userColorOverrides[name];
+    let h = 0;
+    for (let c of name) h = c.codePointAt(0) + ((h << 5) - h);
+    return `hsl(${Math.abs(h) % 360}, 65%, 55%)`;
+}
+
+function defaultUserColor(name) {
+    let h = 0;
+    for (let c of name) h = c.codePointAt(0) + ((h << 5) - h);
+    return `hsl(${Math.abs(h) % 360}, 65%, 55%)`;
+}
+
+const profileCache = {};
+
+function _setInitials(el, username, size) {
+    const div = document.createElement("div");
+    div.className = "avatar-initials";
+    div.textContent = username.slice(0, 2).toUpperCase();
+    div.style.background = userColor(username);
+    div.style.fontSize = Math.round(size * 0.38) + "px";
+    el.appendChild(div);
+}
+
+function applyPresenceDot(dot, state) {
+    dot.className = "avatar-presence";
+    if (state === "active") {
+        dot.classList.add("active");
+    } else if (state === "idle" || state === "hidden") {
+        dot.classList.add("idle");
+    }
+    // offline: base style only (solid gray)
+}
+
+function makeAvatarWrap(username, size = 28, channelKey = null, showDot = true) {
+    const wrap = document.createElement("div");
+    wrap.className = "avatar-wrap";
+    wrap.dataset.username = username;
+    wrap.style.cssText = `width:${size}px;height:${size}px`;
+
+    const inner = document.createElement("div");
+    inner.className = "avatar";
+    if (window.usersWithAvatars.has(username)) {
+        const img = document.createElement("img");
+        img.className = "avatar-img";
+        img.src = `/avatar/${username}`;
+        img.alt = username;
+        img.onerror = () => { img.remove(); _setInitials(inner, username, size); };
+        inner.appendChild(img);
+    } else {
+        _setInitials(inner, username, size);
+    }
+    wrap.appendChild(inner);
+
+    if (showDot) {
+        const dot = document.createElement("span");
+        if (channelKey) {
+            dot.dataset.channel = channelKey;
+        } else {
+            dot.dataset.username = username;
+        }
+        applyPresenceDot(dot, presenceMapCache[username] || "offline");
+        wrap.appendChild(dot);
+    }
+
+    return wrap;
+}
+
+// Upgrade already-rendered avatars from their initials fallback to the real
+// image.  makeAvatarWrap() decides image-vs-initials at render time from
+// window.usersWithAvatars, so anything drawn before /user_avatars resolves
+// (e.g. messages rendered while the sidebar is still loading) is stuck on
+// initials.  loadSidebar() calls this once the set is populated so those
+// stale avatars pick up their image without needing a channel switch.
+function refreshAvatarImages() {
+    document.querySelectorAll(".avatar-wrap[data-username]").forEach(wrap => {
+        const username = wrap.dataset.username;
+        if (!window.usersWithAvatars.has(username)) return;
+        const inner = wrap.querySelector(".avatar");
+        if (!inner || inner.querySelector(".avatar-img")) return; // already an image
+        const size = parseInt(wrap.style.width, 10) || 28;
+        inner.innerHTML = "";
+        const img = document.createElement("img");
+        img.className = "avatar-img";
+        img.src = `/avatar/${username}`;
+        img.alt = username;
+        img.onerror = () => { img.remove(); _setInitials(inner, username, size); };
+        inner.appendChild(img);
+    });
+}
+
+// ---- Account / presence-override ----------------------------------------
+
+// Renders the current user's avatar (with live presence dot) into the topbar
+// account button.  Called after each sidebar load so it picks up the freshly
+// fetched avatar list and presence cache.
+function renderAccountAvatar() {
+    const slot = document.getElementById("account-avatar");
+    if (!slot) return;
+    slot.innerHTML = "";
+    slot.appendChild(makeAvatarWrap(CURRENT_USER, 26));
+}
+
+const accountModal = document.getElementById("account-modal");
+
+async function openAccount() {
+    cancelDeleteConfirm();
+    cancelChangePassword();
+    document.getElementById("account-modal-avatar").innerHTML = "";
+    document.getElementById("account-modal-avatar").appendChild(makeAvatarWrap(CURRENT_USER, 48));
+
+    // Default to "auto" highlight until the server tells us the saved override.
+    _highlightOverride("auto");
+    fetch("/presence/override")
+        .then(r => r.json())
+        .then(data => _highlightOverride(data.override || "auto"))
+        .catch(() => {});
+
+    openModal(accountModal, { display: "flex", label: "Account" });
+
+    // Profile editing (avatar / bio / name colour) — load saved values.
+    const cfg = await fetch("/settings").then(r => r.json()).catch(() => ({}));
+    const currentColor = cfg.name_color || defaultUserColor(CURRENT_USER);
+    _settingsUseDefault = !cfg.name_color;
+    _pendingAvatarBlob = null;
+    _removeAvatar = false;
+    document.getElementById("settings-name-color").value = currentColor;
+    _updateColorPreview(currentColor);
+    _buildColorSwatches(cfg.name_color);
+    _populateAvatarPreview(null);
+
+    const bio = cfg.bio || "";
+    document.getElementById("settings-bio").value = bio;
+    document.getElementById("settings-bio-count").textContent = bio.length;
+}
+
+function _highlightOverride(value) {
+    document.querySelectorAll("#account-presence-options .account-presence-btn").forEach(btn => {
+        btn.classList.toggle("selected", btn.dataset.override === value);
+    });
+}
+
+function setPresenceOverride(value) {
+    _highlightOverride(value);
+    fetch("/presence/override", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ override: value })
+    }).then(() => refreshPresence()).catch(() => {});
+}
+
+function closeAccount() {
+    cancelDeleteConfirm();
+    cancelChangePassword();
+    closeModal(accountModal);
+}
+
+accountModal.addEventListener("click", e => {
+    if (e.target === accountModal) {
+        closeAccount();
+    }
+});
+
+function _showDmHoverCard(el, username) {
+    const card    = document.getElementById("dm-hover-card");
+    const rect    = el.getBoundingClientRect();
+    const bioEl   = document.getElementById("dm-hover-bio");
+    const container = document.getElementById("dm-hover-avatar");
+
+    container.innerHTML = "";
+    container.appendChild(makeAvatarWrap(username, 64));
+    document.getElementById("dm-hover-name").textContent = username;
+
+    const cached = profileCache[username];
+    bioEl.textContent = (cached && cached.bio) ? cached.bio : "";
+    bioEl.style.display = (cached && cached.bio) ? "" : "none";
+
+    card.style.left = (rect.right + 10) + "px";
+    card.style.top  = Math.round(rect.top + rect.height / 2) + "px";
+    card.classList.add("visible");
+
+    if (!cached) {
+        profileCache[username] = null;
+        fetch(`/profile/${encodeURIComponent(username)}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+                if (!data) return;
+                profileCache[username] = data;
+                if (card.classList.contains("visible") &&
+                    document.getElementById("dm-hover-name").textContent === username) {
+                    bioEl.textContent = data.bio || "";
+                    bioEl.style.display = data.bio ? "" : "none";
+                }
+            });
+    }
+}
+
+function _hideDmHoverCard() {
+    document.getElementById("dm-hover-card").classList.remove("visible");
+}
+
+document.getElementById("chat").addEventListener("mouseover", e => {
+    const span = e.target.closest(".user[data-username]");
+    if (span && span.dataset.username !== "system") {
+        _showDmHoverCard(span, span.dataset.username);
+    }
+});
+document.getElementById("chat").addEventListener("mouseout", e => {
+    const span = e.target.closest(".user[data-username]");
+    if (span) _hideDmHoverCard();
+});
+
+// Touch equivalent of hovering a message. The reply/edit/delete/react row is
+// revealed by :hover, which a touch device never fires — so on a phone those
+// four actions were simply unreachable. Tapping a message opens its row (and
+// closes any other), tapping elsewhere closes it.
+//
+// Gated on the pointer type of the actual event rather than a media query, so
+// a hybrid laptop keeps hover-to-reveal for its mouse and still responds to its
+// touchscreen. Taps that land on something already interactive — a link, an
+// action button, the code "Copy" control, a reaction chip — are left alone.
+function closeMessageActions(except) {
+    document.querySelectorAll(".msg.actions-open").forEach(msg => {
+        if (msg !== except) msg.classList.remove("actions-open");
+    });
+}
+
+document.getElementById("chat").addEventListener("pointerup", e => {
+    if (e.pointerType === "mouse") return;
+    const msg = e.target.closest(".msg");
+    if (!msg || e.target.closest("a, button, input, textarea, .reaction-chip")) {
+        closeMessageActions(null);
+        return;
+    }
+    const open = !msg.classList.contains("actions-open");
+    closeMessageActions(msg);
+    msg.classList.toggle("actions-open", open);
+});
+
+// A tap that misses the message list entirely still dismisses the open row.
+// closest() is called optionally because a pointerup retargeted to the document
+// itself has no such method, and a throw here would break every later listener.
+document.addEventListener("pointerup", e => {
+    if (e.pointerType === "mouse") return;
+    if (!e.target.closest?.(".msg")) closeMessageActions(null);
+});
+
+// Infinite scroll upward: pull the previous page as the user approaches the
+// top of what's loaded. loadOlderMessages() guards against overlapping runs.
+document.getElementById("chat").addEventListener("scroll", () => {
+    const chat = document.getElementById("chat");
+    if (chat.scrollTop < historyPrefetchPx(chat)) {
+        loadOlderMessages();
+    }
+    scheduleJumpLatestUpdate();
+}, { passive: true });
+
+// ── Jump to latest ────────────────────────────────────────────────────────────
+// Reading back through history used to be a one-way trip: new messages append
+// silently below the fold (auto-scroll is correctly suppressed while the user
+// is scrolled up), and the only way back was the `G` hotkey. The pill both
+// offers the ride back and says how much was missed on the way.
+let _unseenBelow = 0;
+
+// Deliberately looser than isNearBottom()'s 120px auto-scroll threshold. That
+// one answers "did the user mean to stay at the bottom"; this answers "can the
+// user see the newest message" — offering a jump while the latest message is
+// already on screen is just noise.
+const JUMP_LATEST_THRESHOLD_PX = 40;
+
+// True while a jump is animating. The smooth scroll emits scroll events the
+// whole way down, and without this the pill would reappear as "Jump to latest"
+// for every one of them — a flicker lasting the length of the animation.
+let _jumpingToLatest = false;
+
+function updateJumpLatest() {
+    const chat = document.getElementById("chat");
+    const btn = document.getElementById("jump-latest");
+    if (!chat || !btn) return;
+
+    if (isNearBottom(chat, JUMP_LATEST_THRESHOLD_PX)) {
+        // Arriving at the bottom is itself the acknowledgement — everything
+        // that was counted is now on screen.
+        _unseenBelow = 0;
+        _jumpingToLatest = false;
+        btn.hidden = true;
+        btn.classList.remove("has-unread");
+        return;
+    }
+
+    if (_jumpingToLatest) {
+        btn.hidden = true;
+        return;
+    }
+
+    const label = document.getElementById("jump-latest-text");
+    if (_unseenBelow > 0) {
+        label.textContent = _unseenBelow === 1
+            ? "1 new message"
+            : `${_unseenBelow} new messages`;
+        btn.classList.add("has-unread");
+        btn.setAttribute("aria-label", `${label.textContent} below — jump to latest`);
+    } else {
+        label.textContent = "Jump to latest";
+        btn.classList.remove("has-unread");
+        btn.setAttribute("aria-label", "Jump to latest message");
+    }
+    btn.hidden = false;
+}
+
+function jumpToLatest() {
+    const chat = document.getElementById("chat");
+    if (!chat) return;
+    _unseenBelow = 0;
+    _jumpingToLatest = true;
+    const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    chat.scrollTo({
+        top: chat.scrollHeight,
+        behavior: reduceMotion ? "auto" : "smooth",
+    });
+    updateJumpLatest();
+
+    // Belt and braces: a smooth scroll that never reaches the bottom (the user
+    // grabs the scrollbar mid-flight, or the list grows underneath it) would
+    // otherwise leave the pill suppressed forever, since only arriving at the
+    // bottom clears the flag.
+    setTimeout(() => {
+        if (!_jumpingToLatest) return;
+        _jumpingToLatest = false;
+        updateJumpLatest();
+    }, 1000);
+}
+
+// Called on channel switch: the count belongs to the conversation being left.
+function resetJumpLatest() {
+    _unseenBelow = 0;
+    _jumpingToLatest = false;
+    const btn = document.getElementById("jump-latest");
+    if (btn) btn.hidden = true;
+}
+
+// Whether the pill should be up is a function of one number: how far the
+// scroller is from its own bottom. That number moves for three reasons —
+// scrollTop changes, the content gets taller or shorter, or the viewport
+// resizes — and only the first of them fires a scroll event. Recomputing on
+// scroll alone left the pill asserting something that had quietly stopped
+// being true: still up after the list shrank back under the fold, or still
+// down after an image decoded and pushed the newest message out of sight.
+//
+// So every cause gets an observer, and they all recompute from scratch rather
+// than trying to track the state incrementally.
+//
+// The recompute is deferred to an animation frame rather than run inline in the
+// observer callbacks. updateJumpLatest() reads scrollHeight; doing that from a
+// MutationObserver microtask means forcing a synchronous layout in the middle of
+// a render pass that is still writing to the DOM — the write/read/write pattern
+// that makes appending a page of history thrash. At frame time the layout is
+// already clean and the read is free. One flag collapses a burst of observer
+// callbacks into a single update.
+//
+// If frames stop (backgrounded tab), the pending frame simply runs when the tab
+// is shown again, which is the first moment the answer could matter anyway.
+let _jumpLatestFrame = 0;
+function scheduleJumpLatestUpdate() {
+    if (_jumpLatestFrame) return;
+    _jumpLatestFrame = requestAnimationFrame(() => {
+        _jumpLatestFrame = 0;
+        updateJumpLatest();
+    });
+}
+
+(function observeChatBottom() {
+    const chat = document.getElementById("chat");
+    if (!chat) return;
+
+    // Viewport height: the composer grows with a multi-line draft, the
+    // screen-share banner opens and closes, phones rotate.
+    if (typeof ResizeObserver === "function") {
+        new ResizeObserver(scheduleJumpLatestUpdate).observe(chat);
+    }
+
+    // Content height: messages appended or deleted, an edit reflowing, a
+    // reaction chip wrapping to a new line, a link preview card resolving.
+    // Watching the subtree rather than hooking each of those sites means a
+    // render path added later is covered without having to know about this.
+    if (typeof MutationObserver === "function") {
+        new MutationObserver(scheduleJumpLatestUpdate).observe(chat, {
+            childList: true,
+            subtree: true,
+            characterData: true,
+            // Catches the chat font-size setting, which resizes every message
+            // without adding or removing a single node.
+            attributes: true,
+            attributeFilter: ["style", "class"],
+        });
+    }
+})();
+
+function _refreshUserAvatar(username) {
+    document.querySelectorAll(`.avatar-wrap[data-username="${username}"]`).forEach(wrap => {
+        const inner = wrap.querySelector(".avatar");
+        if (!inner) return;
+        const size = wrap.offsetWidth || 28;
+        inner.innerHTML = "";
+        if (window.usersWithAvatars.has(username)) {
+            const img = document.createElement("img");
+            img.className = "avatar-img";
+            img.src = `/avatar/${username}?v=${Date.now()}`;
+            img.alt = username;
+            img.onerror = () => { img.remove(); _setInitials(inner, username, size); };
+            inner.appendChild(img);
+        } else {
+            _setInitials(inner, username, size);
+        }
+    });
+}
+
+// Switch Channel
+function updateSidebarActive() {
+    const items = document.querySelectorAll(
+        "#sidebar-dynamic [data-channel]"
+    );
+
+    items.forEach(el => {
+        const isActive = el.dataset.channel === channel;
+        el.classList.toggle("active", isActive);
+        // Announce which conversation is open, not just paint it blue.
+        const open = el.querySelector(".sidebar-item-open");
+        if (open) {
+            if (isActive) open.setAttribute("aria-current", "true");
+            else open.removeAttribute("aria-current");
+        }
+    });
+}
+
+function switchChannel(c) {
+    if (channel === c) return;
+
+    // The "Mentions" pseudo-channel is a read-only aggregated list, not a real
+    // channel — it has its own render path and must skip mark_read/polling.
+    if (c === MENTIONS_CHANNEL) {
+        openMentionsChannel();
+        return;
+    }
+
+    // Stash the outgoing channel's compose state before anything clears it
+    // (cancelReply() below drops the reply target).
+    saveDraft(channel);
+
+    closeSidebar();
+
+    // 🚫 Cancel any in-flight fetch
+    if (globalThis.fetchController) {
+        globalThis.fetchController.abort();
+        globalThis.fetchController = null;
+    }
+
+    cancelReply();
+
+    // Restore controls that the Mentions view hides (no-op for normal switches).
+    document.getElementById("input").style.display = "";
+    const _membersBtn = document.getElementById("members-btn");
+    if (_membersBtn) _membersBtn.style.display = "";
+
+    channel = c;
+    lastTs = 0;
+    mentionNotifyArmed = false;
+    lastRenderedDate = null;
+    oldestLoadedTs = null;
+    hasMoreHistory = true;
+    loadingOlderHistory = false;
+    resetJumpLatest();
+
+    // Silence the live region until this channel's backlog has painted, or a
+    // screen reader would announce every message in the history. armChatLog()
+    // turns it back on after the first render pass.
+    disarmChatLog();
+    document.getElementById("chat").innerHTML = "";
+    _typingShowing = false;
+    const _ti = document.getElementById("typing-indicator");
+    _ti.innerHTML = "";
+    _ti.className = "";
+    readReceiptsMap = {};
+    document.querySelector(`[data-channel="${c}"]`)?.querySelector(".unread-badge")?.remove();
+    const isPrivate = c.startsWith("private:");
+    const isDM = c.startsWith("dm:");
+    let channelDisplayName = isPrivate ? (privateChannelMap[c] || c) : c;
+    if (isDM) {
+        const parts = c.split(":").slice(1);
+        const others = parts.filter(u => u !== CURRENT_USER);
+        channelDisplayName = (others.length ? others : parts).join(", ");
+    }
+    document.getElementById("chan").innerText = isPrivate ? "" : channelDisplayName;
+    const chanHash = document.querySelector(".chan-hash");
+    if (chanHash) {
+        chanHash.style.visibility = isPrivate ? "hidden" : "visible";
+        chanHash.textContent = isDM ? "@" : "#";
+    }
+    const nameBar = document.getElementById("private-ch-name-bar");
+    if (nameBar) {
+        nameBar.style.display = isPrivate ? "flex" : "none";
+        if (isPrivate) document.getElementById("private-ch-name-bar-text").textContent = channelDisplayName;
+    }
+
+    const msgPrefix = isDM ? "@" : (isPrivate ? "" : "#");
+    document.getElementById("msg").placeholder = `Type a message to ${msgPrefix}${channelDisplayName}…`;
+
+    // Bring back whatever was half-written here last time (and, crucially,
+    // clear the previous channel's draft if there was nothing saved for this one).
+    restoreDraft(c);
+
+    forceScrollToBottom = true;
+
+    // Read the watermark before mark_read advances it past everything, then
+    // mark read. Ordered, not fired in parallel, or the two race.
+    unreadBoundaryTs = null;
+    unreadScrollPending = true;
+    suppressBottomScroll = false;
+    fetch(`/last_read/${c}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (channel !== c) return;  // user moved on while this was in flight
+            unreadBoundaryTs = data?.last_read_ts ?? null;
+            renderUnreadDivider();
+            scrollToUnreadDivider();
+        })
+        .catch(() => {})
+        .finally(() => fetch(`/mark_read/${c}`, { method: "POST" }));
+
+    _cleanupStandaloneShare();
+    updateCallButton();
+    refreshActiveChannelCall();
+    updateMembersCount();
+    // Load the backlog one-shot for instant paint, then (re)point the SSE stream
+    // at the new channel starting from the cursor that load advanced us to.
+    fetchMessages().then(() => connectEvents());
+    fetchReadReceipts();
+    refreshPins();
+    refreshDMs();
+    refreshTotalUnreadCount();
+}
+
+// Fetch Messages
+function isNearBottom(el, threshold = 120) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+}
+
+// Channels load a page at a time instead of whole. Keep in sync with
+// HISTORY_PAGE_SIZE in chat.py (the server caps the request either way).
+const HISTORY_PAGE_SIZE = 100;
+
+// Oldest message currently rendered, and whether anything precedes it. Together
+// they bound the loaded window: what to ask for when scrolling up, and which
+// incoming deltas refer to messages that sit outside it.
+let oldestLoadedTs = null;
+let hasMoreHistory = true;
+let loadingOlderHistory = false;
+
+// How close to the top of the loaded window the user must get before the next
+// page is requested. Sized against the viewport rather than fixed: a phone
+// fling covers many screen-heights, and a fixed 300px meant the request only
+// started once the user had already arrived. Loading several screens ahead
+// gives the round trip time to land before they get there.
+//
+// This matters more than it looks. Every completed page ends with a scrollTop
+// write to hold the reading position, and on mobile writing scrollTop during a
+// fling cancels the fling — so each page fetched mid-scroll is a visible stop.
+// Fetching early (and in bigger pages) is what keeps those rare.
+function historyPrefetchPx(chat) {
+    return Math.max(800, chat.clientHeight * 3);
+}
+
+// Fetch the page preceding the loaded window and splice it in above, holding
+// the viewport still: prepending grows the scroll content upward, which would
+// otherwise yank whatever the user is reading down the screen.
+async function loadOlderMessages() {
+    if (loadingOlderHistory || !hasMoreHistory || oldestLoadedTs === null) return;
+    if (channel === MENTIONS_CHANNEL) return;
+
+    loadingOlderHistory = true;
+    const requestedChannel = channel;
+    const chat = document.getElementById("chat");
+
+    try {
+        const resp = await fetch(
+            `/messages_before/${requestedChannel}`
+            + `?before=${oldestLoadedTs}&limit=${HISTORY_PAGE_SIZE}`
+        );
+        if (!resp.ok) return;
+        const rows = await resp.json();
+        if (requestedChannel !== channel) return;
+
+        // A short page means there is nothing older left to ask for.
+        if (rows.length < HISTORY_PAGE_SIZE) hasMoreHistory = false;
+        if (!rows.length) return;
+
+        // Anchor on an element, and only now that the response is in hand: the
+        // user has been scrolling throughout the request, so any position
+        // measured before the await is stale by however far they travelled —
+        // restoring it yanks them backwards, which is the snap you see when
+        // scrolling fast.
+        const anchor = chat.querySelector(".msg");
+        // Where the anchor sits relative to the viewport top. Holding *this*
+        // constant is the whole job.
+        const anchorOffset = anchor ? anchor.offsetTop - chat.scrollTop : 0;
+
+        prependMessages(rows);
+
+        if (anchor) {
+            const target = anchor.offsetTop - anchorOffset;
+            // Browsers with scroll anchoring (not Safari) may have already
+            // absorbed the shift. Writing scrollTop when it is already correct
+            // is not a no-op on mobile — it cancels an in-flight fling — so
+            // only correct when the position actually drifted.
+            if (Math.abs(chat.scrollTop - target) > 1) chat.scrollTop = target;
+        }
+    } catch (err) {
+        console.error("loadOlderMessages error:", err);
+    } finally {
+        loadingOlderHistory = false;
+    }
+}
+
+// Render a batch of older messages above everything already on screen.
+// Deliberately not applyMessages(): that appends, which is right for new
+// messages and exactly wrong here.
+function prependMessages(rows) {
+    const chat = document.getElementById("chat");
+    const frag = document.createDocumentFragment();
+    const added = [];
+
+    rows.forEach(m => {
+        if (document.getElementById(`msg-${m.id}`)) return;
+        if (!m.content?.trim() && !m.filename?.trim()) return;
+
+        const msgDate = new Date(m.ts * 1000);
+        const time = msgDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        const fullTime = msgDate.toLocaleString(undefined, {
+            weekday: "long", year: "numeric", month: "long", day: "numeric",
+            hour: "numeric", minute: "2-digit", second: "2-digit"
+        });
+
+        const d = document.createElement("div");
+        // Matches the append path, system notices included.
+        d.className = isSystemMessage(m) ? "msg system-msg" : "msg";
+        d.id = `msg-${m.id}`;
+        d.dataset.sender = m.sender;
+        d.dataset.ts = m.ts;
+        if (isMentioned(m)) d.classList.add("mentioned");
+        try {
+            d.innerHTML = _buildMsgHtml(m, time, fullTime, userColor(m.sender));
+        } catch (err) {
+            console.error(`Failed to render message ${m.id}:`, err);
+            return;
+        }
+        _injectMsgAvatar(d, m.sender);
+        frag.appendChild(d);
+        added.push(d);
+        if (m.reply_to_id) loadQuotedMsg(m.id, m.reply_to_id);
+    });
+
+    chat.insertBefore(frag, chat.firstChild);
+
+    oldestLoadedTs = Math.min(oldestLoadedTs, ...rows.map(m => m.ts));
+
+    // Date dividers are position-dependent, so rebuild them wholesale rather
+    // than trying to patch the seam between the new page and the old top.
+    rebuildDateDividers();
+    regroupMessages();
+    // Only the new nodes: this runs mid-scroll, and re-scheduling previews for
+    // every message already on screen turns each page into a chunk of
+    // main-thread work that grows with how far the user has scrolled back.
+    added.forEach(el => {
+        schedulePreview(el);
+        _checkDeletedFiles(el);
+    });
+    // Same as the append path: a page of history arrives with blank pin buttons
+    // and needs the current pin list painted onto just those nodes.
+    paintPinMarkers(added);
+    // Same reasoning as the previews above: watermarks did not move, so only
+    // the page just prepended needs its receipts painted.
+    updateReadReceiptUI(added);
+}
+
+// Re-derive every date divider from the messages currently rendered. Cheap
+// because the window is bounded, and always correct regardless of whether the
+// batch arrived at the top or the bottom.
+function rebuildDateDividers() {
+    const chat = document.getElementById("chat");
+    chat.querySelectorAll(".date-divider").forEach(el => el.remove());
+
+    let lastKey = null;
+    [...chat.querySelectorAll(".msg")].forEach(el => {
+        const ts = parseFloat(el.dataset.ts);
+        if (!ts) return;
+        const d = new Date(ts * 1000);
+        const key = d.toDateString();
+        if (key === lastKey) return;
+        lastKey = key;
+
+        const divider = document.createElement("div");
+        divider.className = "date-divider";
+        divider.id = `date-${key}`;
+        const label = document.createElement("span");
+        label.textContent = d.toLocaleDateString(undefined, {
+            weekday: "long", year: "numeric", month: "long", day: "numeric"
+        });
+        divider.appendChild(label);
+        chat.insertBefore(divider, el);
+    });
+}
+
+// Set to a message id while a search/mention jump is waiting for that message
+// to render. switchChannel() always requests a scroll to the bottom, which
+// would otherwise immediately undo the jump's scroll — so the render pass skips
+// its auto-scroll while a jump is outstanding. Written from chat-search.js, so
+// it lives on globalThis explicitly rather than as an implicit global, matching
+// allUsers/pendingDms/fetchController.
+globalThis.pendingJumpMsgId = null;
+
+// The #chat log is marked up as an aria-live log region so screen readers
+// announce incoming messages. It starts silent in the markup and is armed from
+// here, because it must stay silent while a channel's existing history paints —
+// both on first load and on every switch — or it would read out the entire
+// backlog. Rendering is driven from several places (one-shot fetch, SSE
+// stream, post-send refresh), so rather than tracking each, the log is
+// disarmed whenever the list is cleared and re-armed after the next render
+// pass completes.
+let _chatLogArmed = false;
+
+function disarmChatLog() {
+    _chatLogArmed = false;
+    document.getElementById("chat")?.setAttribute("aria-live", "off");
+}
+
+function armChatLog() {
+    if (_chatLogArmed) return;
+    _chatLogArmed = true;
+    document.getElementById("chat")?.setAttribute("aria-live", "polite");
+}
+
+// Read watermark for the open channel, captured when it was opened and held
+// fixed while the user stays there — so the "New messages" divider marks where
+// they actually left off and doesn't creep down as messages arrive. Null when
+// the channel has no unread history to divide.
+let unreadBoundaryTs = null;
+
+// Draw (or redraw) the divider above the first message newer than the
+// boundary. Runs after every render pass because messages arrive piecemeal.
+function renderUnreadDivider() {
+    const chat = document.getElementById("chat");
+    if (!chat) return;
+
+    chat.querySelector(".unread-divider")?.remove();
+    if (unreadBoundaryTs === null) return;
+
+    // Own messages don't count as "new to you" — landing the divider above
+    // something you just sent yourself reads as a bug.
+    const target = [...chat.querySelectorAll(".msg")].find(el =>
+        parseFloat(el.dataset.ts) > unreadBoundaryTs
+        && el.dataset.sender !== CURRENT_USER
+    );
+    if (!target) return;
+
+    const divider = document.createElement("div");
+    divider.className = "unread-divider";
+    divider.innerHTML = `<span class="unread-divider-label">New messages</span>`;
+    target.parentNode.insertBefore(divider, target);
+}
+
+// On opening a channel with unread messages, park the view on the divider
+// rather than the very bottom, so the user starts reading at the first thing
+// they haven't seen. Only done once per channel open.
+let unreadScrollPending = false;
+// Set for the remainder of a render pass in which we parked on the divider, so
+// the pass's own scroll-to-bottom doesn't immediately undo it.
+let suppressBottomScroll = false;
+
+function scrollToUnreadDivider() {
+    if (!unreadScrollPending) return;
+    const divider = document.querySelector("#chat .unread-divider");
+    if (!divider) return;
+    unreadScrollPending = false;
+    forceScrollToBottom = false;
+    suppressBottomScroll = true;
+    divider.scrollIntoView({ block: "center" });
+}
+
+// A brand-new DM or private channel has no backlog, which otherwise renders as
+// a large blank void with no indication of where you are or what to do.
+function updateEmptyState() {
+    const chat = document.getElementById("chat");
+    if (!chat) return;
+
+    const existing = chat.querySelector(".chat-empty-state");
+    if (chat.querySelector(".msg")) {
+        existing?.remove();
+        return;
+    }
+    if (existing) return;
+
+    const isDM = channel.startsWith("dm:");
+    const isPrivate = channel.startsWith("private:");
+    let name = channel;
+    if (isDM) {
+        const parts = channel.split(":").slice(1);
+        const others = parts.filter(u => u !== CURRENT_USER);
+        name = "@" + (others.length ? others : parts).join(", @");
+    } else if (isPrivate) {
+        name = privateChannelMap[channel] || channel;
+    } else {
+        name = "#" + channel;
+    }
+
+    const el = document.createElement("div");
+    el.className = "chat-empty-state";
+    const heading = document.createElement("p");
+    heading.className = "chat-empty-title";
+    heading.textContent = isDM
+        ? `This is the start of your conversation with ${name}`
+        : `This is the start of ${name}`;
+    const sub = document.createElement("p");
+    sub.className = "chat-empty-sub";
+    sub.textContent = "Send a message to get things going.";
+    el.append(heading, sub);
+    chat.appendChild(el);
+}
+
+// Take a deleted message out of the list, and repair what its absence changes:
+// the date divider it may have been the last message under, and the grouping of
+// whatever now follows it. Without the regroup, deleting the first message of a
+// cluster left the next one still marked `grouped` — so it kept the continuation
+// styling and stayed stripped of its avatar and sender name, attributed to
+// nobody until the channel was reloaded.
+function _removeDeletedMsg(existing, ts) {
+    if (!existing) return;
+    const after = existing.nextElementSibling;
+    existing.remove();
+
+    const divider = document.getElementById(`date-${new Date(ts * 1000).toDateString()}`);
+    if (divider) {
+        let next = divider.nextElementSibling;
+        let hasMessages = false;
+        while (next && !next.classList.contains("date-divider")) {
+            if (next.classList.contains("msg")) { hasMessages = true; break; }
+            next = next.nextElementSibling;
+        }
+        if (!hasMessages) divider.remove();
+    }
+
+    if (after?.isConnected) regroupMessages(after);
+    updateEmptyState();
+}
+
+
+function _ensureDateDivider(chat, dateKey, msgDate) {
+    const dividerId = `date-${dateKey}`;
+    if (document.getElementById(dividerId)) return false;
+    const divider = document.createElement("div");
+    divider.className = "date-divider";
+    divider.id = dividerId;
+    const dividerLabel = document.createElement("span");
+    dividerLabel.textContent = msgDate.toLocaleDateString(undefined, {
+        weekday: "long", year: "numeric", month: "long", day: "numeric"
+    });
+    divider.appendChild(dividerLabel);
+    chat.appendChild(divider);
+    return true;
+}
+
+// Consecutive messages from the same sender within this many seconds are
+// visually collapsed into one cluster (avatar + name shown only on the first).
+const GROUP_WINDOW_SEC = 300;
+
+// Walk the chat in order and toggle the `grouped` class on each message so
+// that runs of messages from the same sender (within GROUP_WINDOW_SEC, and not
+// broken by a date divider or a system message) render as a single cluster.
+// Messages are stored as separate rows in the backend; this is purely visual.
+// Pass *startEl* to regroup only from that node onwards. Grouping depends on a
+// message and the one before it and nothing else, so an append only needs the
+// nodes it added — and at a few thousand loaded messages a full re-walk costs
+// ~10ms, which is a dropped frame on every single incoming message.
+function regroupMessages(startEl = null) {
+    const chat = document.getElementById("chat");
+    let prevSender = null;
+    let prevTs = 0;
+    // Seed the cluster state from the node before the start point. A divider or
+    // system message there leaves the seed null, which is exactly what the loop
+    // below would have done on reaching it.
+    if (startEl) {
+        const prev = startEl.previousElementSibling;
+        if (prev?.classList.contains("msg") && !prev.classList.contains("system-msg")) {
+            prevSender = prev.dataset.sender;
+            prevTs = parseFloat(prev.dataset.ts) || 0;
+        }
+    }
+    for (let el = startEl || chat.firstElementChild; el; el = el.nextElementSibling) {
+        if (!el.classList.contains("msg")) {
+            // Date dividers (and anything else) break the cluster.
+            prevSender = null;
+            prevTs = 0;
+            continue;
+        }
+        if (el.classList.contains("system-msg")) {
+            el.classList.remove("grouped");
+            prevSender = null;
+            prevTs = 0;
+            continue;
+        }
+        const sender = el.dataset.sender;
+        const ts = parseFloat(el.dataset.ts) || 0;
+        const gap = ts - prevTs;
+        const grouped = sender && sender === prevSender && gap >= 0 && gap < GROUP_WINDOW_SEC;
+        el.classList.toggle("grouped", grouped);
+        prevSender = sender;
+        prevTs = ts;
+    }
+}
+
+// A channel notice posted by the server (welcome greeting, "X renamed the
+// channel", "X added Y", "X has left"), not something a person typed. The
+// `content_type` column is authoritative; `sender` is checked as well so a row
+// written before that column was carried in the payload still reads as one.
+function isSystemMessage(m) {
+    return m.content_type === "system" || m.sender === "system";
+}
+
+function _buildMsgHtml(m, time, fullTime, color) {
+    const isSystem = isSystemMessage(m);
+    const displayName = isSystem ? "MiniMost" : m.sender;
+    let headerHtml = `<span class="user ${isSystem ? "system-msg-name" : ""}" style="color:${isSystem ? "" : color}" data-username="${m.sender}">${displayName}</span>`;
+    headerHtml += `<span class="time" title="${fullTime}">${time}</span>`;
+
+    // Sits in the header proper, not in .msg-actions: that container is
+    // opacity:0 until the row is hovered, which hid the fact that a message had
+    // been edited unless you happened to mouse over it.
+    if (m.edited) {
+        const editedDate = new Date(m.edited_ts * 1000);
+        const formatted = editedDate.toLocaleString('en-US', {
+            month: '2-digit', day: '2-digit', year: '2-digit',
+            hour: '2-digit', minute: '2-digit', hour12: true
+        });
+        headerHtml += `<span class="edited-marker" title="Last edited at ${formatted}">(edited)</span>`;
+    }
+
+    // A system notice is nobody's message: there is no one to reply to and
+    // nothing to react to, so it gets no action row at all.
+    let actionsHtml = "";
+    if (m.sender === CURRENT_USER && !isSystem) {
+        actionsHtml += `<button class="edit-btn" title="Edit" onclick="startEdit(${m.id})"><svg class="edit-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg></button>`;
+        actionsHtml += `<button class="delete-btn" title="Delete" onclick="deleteMsg(${m.id})"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>`;
+    }
+
+    if (!isSystem) {
+        actionsHtml += `<button class="reply-btn" title="Reply" onclick="startReply(${m.id})"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg></button>`;
+        actionsHtml += `<button class="react-btn" title="Add reaction" onclick="openReactionPicker(${m.id}, event)"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg></button>`;
+        // Pinning is channel-wide and open to any member, so this is offered on
+        // everyone's messages, not just your own. The pressed state is painted
+        // by paintPinMarkers() from the pin list rather than rendered here —
+        // this function has no view of what is currently pinned.
+        actionsHtml += `<button class="pin-btn" title="Pin to channel" aria-pressed="false" onclick="togglePin(${m.id})"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16"><path d="M4.146.146A.5.5 0 0 1 4.5 0h7a.5.5 0 0 1 .5.5c0 .68-.342 1.174-.646 1.479-.126.125-.25.224-.354.298v4.431l.078.048c.203.127.476.314.751.555C12.36 7.775 13 8.527 13 9.5a.5.5 0 0 1-.5.5h-4v4.5c0 .276-.224 1.5-.5 1.5s-.5-1.224-.5-1.5V10h-4a.5.5 0 0 1-.5-.5c0-.973.64-1.725 1.17-2.189A6 6 0 0 1 5 6.708V2.277a3 3 0 0 1-.354-.298C4.342 1.674 4 1.179 4 .5a.5.5 0 0 1 .146-.354"/></svg></button>`;
+    }
+    if (actionsHtml) headerHtml += `<span class="msg-actions">${actionsHtml}</span>`;
+
+    let bodyHtml = "";
+    if (m.reply_to_id) {
+        bodyHtml += `<div class="quoted-msg" id="quoted-${m.id}" onclick="scrollToMsg(${m.reply_to_id})"><em>Loading…</em></div>`;
+    }
+
+    // Read receipt trails the message text inline (so it reads as "text ✓"). It
+    // lives *inside* the .text div: after plain text it stays on the same line,
+    // while after a code block (a block-level <pre>) it naturally drops to the
+    // next line, left-aligned, instead of overlapping the code-block header.
+    const receiptHtml = m.sender === CURRENT_USER
+        ? `<span class="read-receipt" data-ts="${m.ts}"></span>`
+        : "";
+
+    let receiptPlaced = false;
+    if (m.content?.trim()) {
+        const emojiOnly = isEmojiOnly(m.content) ? " emoji-only" : "";
+        bodyHtml += `<div class="text${emojiOnly}" id="msg-text-${m.id}" data-raw="${escapeHtml(m.content)}">${formatText(m.content)}${receiptHtml}</div>`;
+        receiptPlaced = true;
+    }
+
+    if (m.filename) {
+        const imageExts = /\.(png|jpg|jpeg|gif|webp)$/i;
+        const files = m.filename.split(",");
+        for (const fn of files) {
+            if (imageExts.test(fn)) {
+                bodyHtml += `<a href="/files/${fn}" target="_blank"><img src="/files/${fn}" class="chat-image" loading="lazy" onerror="this.onerror=null; this.src='/static/retention.png';"></a>`;
+            } else {
+                const displayName = (fn.length > 33 && fn[32] === "_") ? fn.slice(33) : fn;
+                const safeName = escapeHtml(displayName);
+                const icon = fileIconFor(displayName);
+                bodyHtml += `<a href="/files/${fn}" class="file-download" data-fn="${fn}" download="${safeName}"><img class="file-type-icon" src="/static/file-icons/${icon}.svg" alt="" loading="lazy"><span class="file-meta"><span class="file-name">${safeName}</span><span class="file-size"></span></span></a>`;
+            }
+        }
+    }
+
+    if (!isSystem) {
+        bodyHtml += `<div class="reactions" id="reactions-${m.id}">${buildReactionsHtml(m.id, m.reactions)}</div>`;
+    }
+
+    // No text body (e.g. a file/image-only message): trail the receipt after the
+    // body so it still shows, left-aligned.
+    const trailingReceipt = receiptPlaced ? "" : receiptHtml;
+
+    return `<div class="msg-avatar-slot"></div><div class="msg-content-col"><div class="msg-header">${headerHtml}</div><div class="msg-body">${bodyHtml}</div>${trailingReceipt}</div>`;
+}
+
+function _injectMsgAvatar(msgEl, sender) {
+    const slot = msgEl.querySelector(".msg-avatar-slot");
+    if (!slot) return;
+    let wrap;
+    if (sender === "system") {
+        wrap = document.createElement("div");
+        wrap.className = "avatar-wrap";
+        wrap.style.cssText = "width:32px;height:32px;flex-shrink:0";
+        const inner = document.createElement("div");
+        inner.className = "avatar";
+        const img = document.createElement("img");
+        img.className = "avatar-img";
+        img.src = "/static/minimost-icon-32.svg";
+        img.alt = "MiniMost";
+        inner.appendChild(img);
+        wrap.appendChild(inner);
+    } else {
+        wrap = makeAvatarWrap(sender, 32);
+        wrap.onmouseenter = () => _showDmHoverCard(wrap, sender);
+        wrap.onmouseleave = _hideDmHoverCard;
+    }
+    slot.replaceWith(wrap);
+}
+
+function fetchMessages() {
+    // The Mentions pseudo-channel has no /messages endpoint; its own poller
+    // (fetchMentions) refreshes the view instead.
+    if (channel === MENTIONS_CHANNEL) return Promise.resolve();
+
+    globalThis.fetchController = new AbortController();
+    const signal = globalThis.fetchController.signal;
+
+    // 🔒 Capture channel at request time
+    const requestedChannel = channel;
+
+    // A first load asks for one page; deltas (lastTs > 0) stay uncapped so the
+    // client can't miss a change that happened since its cursor.
+    const url = lastTs
+        ? `/messages/${requestedChannel}?after=${lastTs}`
+        : `/messages/${requestedChannel}?after=0&limit=${HISTORY_PAGE_SIZE}`;
+
+    // Returns the fetch promise so callers (switchChannel) can open the SSE
+    // stream only after lastTs has advanced past the freshly-loaded backlog —
+    // that way the stream starts at the right cursor and never re-sends history.
+    return fetch(url, { signal })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            // ❌ Ignore if aborted (channel-change is handled in applyMessages)
+            if (signal.aborted) return;
+            applyMessages(data, requestedChannel);
+        })
+        .catch(err => {
+            if (err.name !== "AbortError") {
+                console.error("fetchMessages error:", err);
+            }
+        });
+}
+
+// Render a batch of /messages rows into the open channel. Shared by the
+// one-shot load on channel switch (fetchMessages) and the SSE push stream
+// (chat-events.js), which both deliver the same JSON payload.
+function applyMessages(data, requestedChannel = channel) {
+    // Drop a batch meant for a channel the user already switched away from.
+    if (requestedChannel !== channel) return;
+            // The first completed response for a channel is its baseline load;
+            // mentions seen in it are history, not fresh alerts.
+            const notifyArmed = mentionNotifyArmed;
+            mentionNotifyArmed = true;
+            // Captured before the loop advances lastTs past this batch.
+            const isFirstPage = lastTs === 0;
+            if (!data || data.length === 0) {
+                // Nothing at all in the channel — there is no history to page.
+                if (isFirstPage) hasMoreHistory = false;
+                // An empty batch still completes the channel's load: a brand-new
+                // conversation needs its empty state, and the live region has to
+                // be armed or a channel with no backlog would never announce.
+                updateEmptyState();
+                armChatLog();
+                return;
+            }
+
+            const chat = document.getElementById("chat");
+            const shouldAutoScroll =
+                forceScrollToBottom || isNearBottom(chat);
+
+            let appended = false;
+            let playNewMsgSound = false;
+            let mentionMsg = null;
+            // Counted separately from `appended`, which also goes true for date
+            // dividers and for the user's own sends — neither is something the
+            // user "missed" and needs offering a ride back down to.
+            let newFromOthers = 0;
+            // Everything appended in this batch lands after whatever is last
+            // right now, which lets the regroup and receipt passes below touch
+            // only the new tail instead of re-walking the whole channel.
+            const tailBefore = chat.lastElementChild;
+            // Existing rows re-rendered in place (an edit or a reaction) get a
+            // fresh, blank .read-receipt span, so they need repainting too even
+            // though they are not new.
+            const rerendered = [];
+
+            data.forEach(m => {
+              // One malformed message must not abort the batch. Without this,
+              // anything that threw while building a row (see the code-block
+              // placeholder handling in formatText) silently swallowed every
+              // message after it — and kept doing so on every reload.
+              try {
+                if (requestedChannel !== channel) return;
+                const msgId = `msg-${m.id}`;
+                const existing = document.getElementById(msgId);
+
+                if (m.deleted) {
+                    _removeDeletedMsg(existing, m.ts);
+                    lastTs = Math.max(lastTs, m.deleted_ts || m.ts);
+                    return;
+                }
+
+                if (!m.content?.trim() && !m.filename?.trim()) {
+                    lastTs = Math.max(lastTs, m.ts);
+                    return;
+                }
+
+                const msgDate = new Date(m.ts * 1000);
+                const dateKey = msgDate.toDateString();
+                if (_ensureDateDivider(chat, dateKey, msgDate)) appended = true;
+
+                const time = msgDate.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+                const fullTime = msgDate.toLocaleString(undefined, {
+                    weekday: "long", year: "numeric", month: "long", day: "numeric",
+                    hour: "numeric", minute: "2-digit", second: "2-digit"
+                });
+                const color = userColor(m.sender);
+                const html = _buildMsgHtml(m, time, fullTime, color);
+                const isSystem = isSystemMessage(m);
+
+                if (existing) {
+                    const textSpan = existing.querySelector(".text");
+                    if (textSpan?.dataset.editing === "true") {
+                        lastTs = Math.max(lastTs, m.ts);
+                        return;
+                    }
+                    existing.innerHTML = html;
+                    existing.dataset.sender = m.sender;
+                    existing.dataset.ts = m.ts;
+                    existing.classList.toggle("system-msg", isSystem);
+                    existing.classList.toggle("mentioned", isMentioned(m));
+                    _injectMsgAvatar(existing, m.sender);
+                    schedulePreview(existing);
+                    _checkDeletedFiles(existing);
+                    rerendered.push(existing);
+                } else if (oldestLoadedTs !== null && m.ts < oldestLoadedTs) {
+                    // A change to a message older than the loaded window — an
+                    // edit or reaction on history the user hasn't scrolled back
+                    // to. There is no element to update, and creating one would
+                    // append it to the bottom, out of order. Skip it; the
+                    // current state arrives with the page when they scroll up.
+                    lastTs = Math.max(lastTs, m.ts, m.edited_ts || 0, m.reactions_ts || 0);
+                    return;
+                } else {
+                    const d = document.createElement("div");
+                    d.className = isSystem ? "msg system-msg" : "msg";
+                    d.id = msgId;
+                    d.dataset.sender = m.sender;
+                    d.dataset.ts = m.ts;
+                    if (isMentioned(m)) d.classList.add("mentioned");
+                    d.innerHTML = html;
+                    _injectMsgAvatar(d, m.sender);
+                    chat.appendChild(d);
+                    schedulePreview(d);
+                    _checkDeletedFiles(d);
+                    appended = true;
+                    // A channel notice ("X renamed the channel") is not someone
+                    // talking to you: it should not ring, and it should not be
+                    // counted as a message you missed.
+                    if (m.sender !== CURRENT_USER && !isSystem) {
+                        playNewMsgSound = true;
+                        newFromOthers++;
+                        if (isMentioned(m)) mentionMsg = m;
+                    }
+                }
+
+                if (m.reply_to_id) loadQuotedMsg(m.id, m.reply_to_id);
+                lastTs = Math.max(lastTs, m.ts, m.edited_ts || 0, m.reactions_ts || 0);
+              } catch (err) {
+                console.error(`Failed to render message ${m?.id}:`, err);
+                // Advance past it so the cursor doesn't stall and re-deliver
+                // the same unrenderable message forever.
+                lastTs = Math.max(lastTs, m?.ts || 0);
+              }
+            });
+
+            // Only the tail this batch appended, plus the one node before it
+            // whose "is the next message a continuation" answer may have moved.
+            const firstNew = tailBefore ? tailBefore.nextElementSibling : chat.firstElementChild;
+            const newNodes = [];
+            for (let el = firstNew; el; el = el.nextElementSibling) newNodes.push(el);
+            // Nothing appended means no grouping can have moved: a re-rendered
+            // row keeps its sender and ts, which are the only inputs.
+            if (firstNew) regroupMessages(firstNew);
+
+            // A row rendered by this batch has a blank pin button and no
+            // .pinned class — _buildMsgHtml has no view of the pin list — so
+            // paint the ones this pass touched. Only those: a full repaint on
+            // every incoming message would walk the whole loaded window for a
+            // result that cannot have changed for rows nothing rewrote.
+            paintPinMarkers([...newNodes, ...rerendered]);
+
+            const mentionAlert = mentionMsg && notifyArmed;
+
+            // Play the alert sound when the page is inactive and gets any new
+            // message, or — even when focused — when the user is mentioned.
+            // Messages in other channels are handled by maybeNotifyUnread;
+            // playNotifSound is debounced so the two paths can't double-play.
+            const backgroundAlert = playNewMsgSound && !pageActive();
+            // "Notify while active" alerts on focused messages too, but only
+            // once the channel's baseline load is done — otherwise opening a
+            // channel with unread history would announce all of it.
+            const activeAlert = playNewMsgSound && notifyWhenActive && notifyArmed;
+            if (backgroundAlert || activeAlert || mentionAlert) {
+                playNotifSound();
+            }
+
+            // A mention fires a native OS notification regardless of whether
+            // the tab is focused (respecting the native-notification toggle).
+            if (mentionAlert) {
+                notifyMention(mentionMsg);
+            }
+
+            // Only mark read when the page is genuinely in front of the user —
+            // visible *and* focused. A visible-but-unfocused tab (browser behind
+            // another app) must leave new messages unread until the user returns;
+            // reconcileOnActive() then marks them read on focus/visibilitychange.
+            if (appended && pageActive()) {
+                // Until that POST lands the channel still reads as unread, so
+                // tell maybeNotifyUnread the rise it is about to see belongs to
+                // a message the user is looking at.
+                if (newFromOthers > 0) globalThis.lastActiveChannelMsgAt = Date.now();
+                // Fire-and-forget: a missed read marker self-corrects on the next
+                // append or focus, so it is not worth surfacing.
+                fetch(`/mark_read/${channel}`, { method: "POST" }).catch(() => {});
+            }
+
+            // Track the bottom edge of the loaded window. A first page that
+            // came back short means the whole channel fits — nothing to page.
+            const rendered = data.filter(m => !m.deleted).map(m => m.ts);
+            if (rendered.length) {
+                oldestLoadedTs = oldestLoadedTs === null
+                    ? Math.min(...rendered)
+                    : Math.min(oldestLoadedTs, ...rendered);
+            }
+            if (isFirstPage && data.length < HISTORY_PAGE_SIZE) hasMoreHistory = false;
+
+            // readReceiptsMap is untouched by this path, so only the rows that
+            // gained or replaced a receipt span need painting.
+            updateReadReceiptUI([...newNodes, ...rerendered]);
+            refreshDMs();
+            updateEmptyState();
+            renderUnreadDivider();
+            scrollToUnreadDivider();
+            // Backlog for this channel is on screen; anything appended from
+            // here on is genuinely new and worth announcing.
+            armChatLog();
+
+            if ((forceScrollToBottom || appended) && shouldAutoScroll
+                && !globalThis.pendingJumpMsgId && !suppressBottomScroll) {
+                requestAnimationFrame(() => {
+                    chat.scrollTop = chat.scrollHeight;
+                    updateJumpLatest();
+                });
+                forceScrollToBottom = false;
+            } else {
+                // The view stayed put, so anything that just landed is below the
+                // fold. Only count once the channel's backlog is on screen —
+                // notifyArmed is false for the baseline load, whose messages are
+                // history the user is choosing to read, not new arrivals.
+                if (notifyArmed) _unseenBelow += newFromOthers;
+                updateJumpLatest();
+            }
+}
+
+// Transient, non-blocking notification (e.g. when a rate limit is hit). Stacks
+// in #toast-container and auto-dismisses. Declared here in the page's main
+// script so every chat-*.js file can call it. Global by design.
+function showToast(message, duration = 5000) {
+    const container = document.getElementById("toast-container");
+    if (!container) return;
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.setAttribute("role", "status");
+    el.textContent = message;
+    container.appendChild(el);
+    // Reveal on the next frame so the CSS transition actually runs.
+    requestAnimationFrame(() => el.classList.add("show"));
+    setTimeout(() => {
+        el.classList.remove("show");
+        setTimeout(() => el.remove(), 200);
+    }, duration);
+}
+
+// Show a refused response as a toast, preferring the server's own explanation
+// (a rate-limit cooldown, a conversation naming an account that doesn't exist)
+// over the generic *fallback*.
+async function showResponseToast(response, fallback) {
+    let message = "";
+    try {
+        message = (await response.text()).trim();
+    } catch {
+        message = "";
+    }
+    showToast(message || fallback);
+}
+
+// Send messages
+function send() {
+    const text = msgBox.value.trim();
+
+    if (!text && pendingFiles.length === 0) return;
+
+    // Block over-limit sends up front so the text isn't silently dropped by the
+    // server's 413; the counter (now red) already shows why.
+    if (text.length > MAX_MESSAGE_CHARS) {
+        updateCharCount();
+        msgBox.focus();
+        return;
+    }
+
+    const form = new FormData();
+    form.append("text", text);
+
+    if (currentReplyId !== null) {
+        form.append("reply_to_id", currentReplyId);
+    }
+
+    pendingFiles.forEach(f => {
+        form.append("files", f);
+    });
+
+    forceScrollToBottom = true;
+
+    fetch(`/send/${channel}`, {
+        method: "POST",
+        body: form
+    }).then(r =>  {
+        if (r.ok) {
+            msgBox.value = "";
+            pendingFiles = [];
+            preview.innerHTML = "";
+            updateSendState();
+            cancelReply();
+            fetchMessages();
+        } else if (r.status === 413) {
+            // Server rejected the message (too long, or a slipped-through paste).
+            // Keep the text and flag the counter red so the failure is visible
+            // instead of the message just vanishing.
+            updateCharCount();
+            const counter = document.getElementById("char-count");
+            if (counter) {
+                counter.classList.remove("hidden");
+                counter.classList.add("over-limit");
+            }
+        } else if (r.status === 429) {
+            // Rate limited. Keep the text in the box so nothing is lost and the
+            // user can resend once the brief cooldown passes.
+            showResponseToast(
+                r,
+                "You're sending messages too quickly. Please slow down.",
+            );
+        } else if (r.status === 400) {
+            // The server can say something specific and useful here — e.g. that
+            // this conversation names an account that doesn't exist — so pass
+            // its reason through rather than the generic failure below.
+            showResponseToast(r, "Couldn't send that message.");
+        } else {
+            // Any other refusal (auth expired, server error). Say so rather than
+            // letting the message quietly disappear from the user's mental model
+            // of what was sent; the text stays in the box either way.
+            showToast("Couldn't send that message — it's still in the box, try again.");
+        }
+    }).catch(() => {
+        // The request never reached the server: offline, server down, or the
+        // link dropped mid-flight. Without this the promise rejected unhandled
+        // and pressing Enter did nothing at all — no error, no sent message,
+        // and no reason to doubt it had worked.
+        showToast("Couldn't send — you appear to be offline. The message is still in the box.");
+    });
+}
+
+// Edit Messages
+// The read receipt span lives inside the .text div, so re-rendering the text
+// (edit/cancel/save) drops it. Rebuild it from the message's ts so it persists.
+function _readReceiptSpan(msgId) {
+    const msgEl = document.getElementById(`msg-${msgId}`);
+    const ts = msgEl ? msgEl.dataset.ts : "";
+    return `<span class="read-receipt" data-ts="${ts}"></span>`;
+}
+
+function startEdit(msgId) {
+    const textDiv = document.getElementById(`msg-text-${msgId}`);
+    const originalText = textDiv.dataset.raw || textDiv.innerText;
+
+    // Prevent double-edit
+    if (textDiv.dataset.editing === "true") return;
+    textDiv.dataset.editing = "true";
+
+    textDiv.innerHTML = `
+        <textarea id="edit-input-${msgId}" rows="3" style="width:100%;">${escapeHtml(originalText)}</textarea>
+        <div class="edit-actions">
+            <button id="save-${msgId}" class="edit-save-btn">Save</button>
+            <button id="cancel-${msgId}" class="edit-cancel-btn">Cancel</button>
+        </div>
+    `;
+
+    const input = document.getElementById(`edit-input-${msgId}`);
+    const saveBtn = document.getElementById(`save-${msgId}`);
+    const cancelBtn = document.getElementById(`cancel-${msgId}`);
+
+    // Button handlers
+    saveBtn.addEventListener("click", () => saveEdit(msgId));
+    cancelBtn.addEventListener("click", () => cancelEdit(msgId));
+
+    // Keyboard shortcuts
+    input.addEventListener("keydown", e => {
+        if (e.ctrlKey && e.key === "Enter") {
+            e.preventDefault();
+            saveEdit(msgId);
+        }
+        if (e.key === "Escape") {
+            e.preventDefault();
+            cancelEdit(msgId);
+        }
+    });
+
+    input.focus();
+    input.selectionStart = input.selectionEnd = input.value.length;
+
+    // The editor is taller than the message it replaces, so on the newest
+    // message the Save/Cancel buttons land below the fold. Bring the whole
+    // editor into view once the browser has laid it out.
+    requestAnimationFrame(() => {
+        document.getElementById(`edit-input-${msgId}`)
+            ?.closest(".msg")
+            ?.scrollIntoView({ block: "nearest" });
+    });
+}
+
+function cancelEdit(msgId) {
+    const textDiv = document.getElementById(`msg-text-${msgId}`);
+    const originalText = textDiv.dataset.raw || "";
+    textDiv.innerHTML = formatText(originalText) + _readReceiptSpan(msgId);
+    delete textDiv.dataset.editing;
+    // Only this row's span was replaced.
+    updateReadReceiptUI(textDiv);
+}
+
+function saveEdit(msgId) {
+    const input = document.getElementById(`edit-input-${msgId}`);
+    const newText = input.value.trim();
+
+    if (!newText) {
+        showToast("Message cannot be empty");
+        return;
+    }
+
+    fetch(`/edit/${msgId}`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({ text: newText })
+    })
+    .then(res => {
+        if (!res.ok) throw new Error("Edit failed");
+        return res.text();
+    })
+    .then(() => {
+        const textDiv = document.getElementById(`msg-text-${msgId}`);
+        textDiv.dataset.raw = newText;
+        textDiv.innerHTML = formatText(newText) + _readReceiptSpan(msgId);
+        delete textDiv.dataset.editing;
+        // Only this row's span was replaced.
+        updateReadReceiptUI(textDiv);
+    })
+    .catch(err => {
+        showToast("Could not edit message");
+        console.error(err);
+    });
+}
+
+function deleteMsg(msgId) {
+    fetch(`/delete/${msgId}`, { method: "POST" })
+        .then(res => {
+            if (!res.ok) throw new Error("Delete failed");
+            // Same removal the push stream's tombstone takes, so a message
+            // deleted here and one deleted in another tab leave the list in
+            // exactly the same state.
+            const el = document.getElementById(`msg-${msgId}`);
+            if (el) _removeDeletedMsg(el, parseFloat(el.dataset.ts));
+        })
+        .catch(err => {
+            showToast("Could not delete message");
+            console.error(err);
+        });
+}
+
+// Reply
+const quotedMsgCache = {};
+let currentReplyId = null;
+
+// One-line plain-text summary of a message body, for the reply banner and
+// quoted-reply block. Those showed the raw source, so a quoted message read
+// literally as "Testing **bold** and `code`" — markup the author never typed as
+// content. Strip the inline markers (same set formatText renders) and flatten
+// newlines rather than rendering HTML, which would drag block-level elements
+// like code blocks into a single-line preview.
+function messagePreviewText(content, maxLen) {
+    let text = (content || "")
+        .replace(/```[a-z]*\n?([\s\S]*?)```/gi, "$1")  // fenced code → its body
+        .replace(/`([^`]+)`/g, "$1")
+        .replace(/\*\*(.+?)\*\*/gs, "$1")
+        .replace(/__(.+?)__/gs, "$1")
+        .replace(/~~(.+?)~~/gs, "$1")
+        .replace(/\*(.+?)\*/gs, "$1")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (text.length > maxLen) text = text.substring(0, maxLen) + "…";
+    return text;
+}
+
+function renderQuotedBlock(containerId, msg) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    const color = userColor(msg.sender);
+    let content;
+    if (msg.deleted) {
+        content = "<em>[deleted message]</em>";
+    } else if (msg.content?.trim()) {
+        content = escapeHtml(messagePreviewText(msg.content, 100));
+    } else {
+        content = "<em>[attachment]</em>";
+    }
+    el.innerHTML = `<span class="quoted-sender" style="color:${color}">${escapeHtml(msg.sender)}</span>: ${content}`;
+}
+
+function loadQuotedMsg(msgId, replyToId) {
+    const containerId = `quoted-${msgId}`;
+    if (quotedMsgCache[replyToId]) {
+        renderQuotedBlock(containerId, quotedMsgCache[replyToId]);
+        return;
+    }
+    fetch(`/message/${replyToId}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (!data) return;
+            quotedMsgCache[replyToId] = data;
+            renderQuotedBlock(containerId, data);
+        })
+        .catch(() => {
+            const el = document.getElementById(containerId);
+            if (el) el.innerHTML = "<em>[unavailable]</em>";
+        });
+}
+
+function startReply(msgId) {
+    currentReplyId = msgId;
+    if (quotedMsgCache[msgId]) {
+        showReplyBanner(quotedMsgCache[msgId]);
+    } else {
+        fetch(`/message/${msgId}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+                if (!data) return;
+                quotedMsgCache[msgId] = data;
+                showReplyBanner(data);
+            });
+    }
+    msgBox.focus();
+}
+
+function showReplyBanner(msg) {
+    const banner = document.getElementById("reply-banner");
+    const senderEl = document.getElementById("reply-banner-sender");
+    const previewEl = document.getElementById("reply-banner-preview");
+    const color = userColor(msg.sender);
+    senderEl.textContent = msg.sender;
+    senderEl.style.color = color;
+    let preview;
+    if (msg.deleted) {
+        preview = "[deleted message]";
+    } else if (msg.content?.trim()) {
+        preview = messagePreviewText(msg.content, 80);
+    } else {
+        preview = "[attachment]";
+    }
+    previewEl.textContent = preview;
+    banner.classList.remove("hidden");
+}
+
+function cancelReply() {
+    currentReplyId = null;
+    document.getElementById("reply-banner").classList.add("hidden");
+}
+
+function scrollToMsg(msgId) {
+    const el = document.getElementById(`msg-${msgId}`);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.style.transition = "background 0.2s";
+    el.style.background = "#2a3a4a";
+    setTimeout(() => { el.style.background = ""; }, 1200);
+}
+
+// ── Jumping to a message (search results, mentions) ───────────────────────────
+// Channels render a page at a time, so the message a search hit or a mention
+// points at is usually *not* on screen — anything older than the newest
+// HISTORY_PAGE_SIZE messages has no element to scroll to. The jump used to poll
+// for one that could never appear and then tell the user the message had
+// probably been deleted, which was both a dead end and untrue. It now pulls in
+// the history between here and there first.
+
+// How long to wait for the incoming channel's first page to paint.
+const JUMP_RENDER_TIMEOUT_MS = 8000;
+// Let the reveal scroll settle before releasing the auto-scroll suppression, so
+// the next render pass doesn't snap the list straight back to the bottom.
+const JUMP_SETTLE_MS = 600;
+// Ceiling on how much history one jump will page in. At HISTORY_PAGE_SIZE a
+// page that is ~2000 messages back, past any realistic search hit, and bounded
+// so a jump into the distant past can't walk a whole channel a page at a time.
+const JUMP_MAX_PAGES = 20;
+const JUMP_POLL_MS = 50;
+
+// Poll *predicate* on a timer rather than requestAnimationFrame: frames stop in
+// a backgrounded tab, and a jump left waiting on one would never finish — which
+// stranded pendingJumpMsgId set, silently suppressing every scroll-to-bottom
+// for the rest of the session.
+function _waitUntil(predicate, timeoutMs) {
+    return new Promise(resolve => {
+        const deadline = Date.now() + timeoutMs;
+        const tick = () => {
+            if (predicate()) return resolve(true);
+            if (Date.now() >= deadline) return resolve(false);
+            setTimeout(tick, JUMP_POLL_MS);
+        };
+        tick();
+    });
+}
+
+// Page history backwards until the loaded window reaches back to *targetTs*.
+async function _loadHistoryBackTo(targetTs, requestedChannel) {
+    for (let page = 0; page < JUMP_MAX_PAGES; page++) {
+        if (channel !== requestedChannel) return false;
+        if (oldestLoadedTs !== null && oldestLoadedTs <= targetTs) return true;
+        if (!hasMoreHistory) return false;
+        const before = oldestLoadedTs;
+        await loadOlderMessages();
+        // A scroll-triggered load already running makes loadOlderMessages a
+        // no-op; wait for it rather than spinning through the page budget.
+        if (oldestLoadedTs === before) await new Promise(r => setTimeout(r, 120));
+    }
+    return oldestLoadedTs !== null && oldestLoadedTs <= targetTs;
+}
+
+// Open *msgChannel*, bring message *msgId* on screen, and flash it. *ts* is the
+// message's timestamp, which is what tells us how far back to load.
+async function revealMessage(msgChannel, msgId, ts) {
+    const present = () => document.getElementById(`msg-${msgId}`);
+    // Claim the jump before switching: switchChannel() requests a scroll to the
+    // bottom for the incoming channel, which would otherwise land on top of ours.
+    globalThis.pendingJumpMsgId = msgId;
+    try {
+        switchChannel(msgChannel);
+        // The first page is what sets oldestLoadedTs, and paging back needs it.
+        await _waitUntil(
+            () => channel !== msgChannel || present() || oldestLoadedTs !== null,
+            JUMP_RENDER_TIMEOUT_MS,
+        );
+        if (channel !== msgChannel) return;
+
+        if (!present() && Number.isFinite(ts)) {
+            await _loadHistoryBackTo(ts, msgChannel);
+            if (channel !== msgChannel) return;
+        }
+
+        if (present()) {
+            scrollToMsg(msgId);
+            await new Promise(r => setTimeout(r, JUMP_SETTLE_MS));
+        } else {
+            showToast("Couldn't reach that message — it may have been deleted.");
+        }
+    } finally {
+        if (globalThis.pendingJumpMsgId === msgId) globalThis.pendingJumpMsgId = null;
+    }
+}
+
+</script>
+<script src="{{ url_for('static', filename='chat-modals.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-sidebar.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-dm.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-settings.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-channels.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-reactions.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-search.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-mentions.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-pins.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-calls.js') }}"></script>
+<script src="{{ url_for('static', filename='chat-events.js') }}"></script>
+<script src="{{ url_for('static', filename='auth-password-rules.js') }}"></script>
+<script src="{{ url_for('static', filename='auth-password-field.js') }}"></script>
+<div id="pc-member-tooltip"></div>
+<div id="toast-container" aria-live="polite" aria-atomic="false"></div>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js');
+      }
+    </script>
+</body>
+</html>
