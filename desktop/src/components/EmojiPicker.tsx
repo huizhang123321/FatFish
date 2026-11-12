@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../lib/api";
 import { EMOJI_GROUPS, STICKERS, stickerToken, stickerUrl } from "../lib/stickers";
 import type { CustomSticker } from "../lib/types";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 interface EmojiPickerProps {
   /** Insert plain text (an emoji) at the caret. */
@@ -33,6 +34,9 @@ export function EmojiPicker({ onEmoji, onSticker, onClose, onError }: EmojiPicke
   const [limit, setLimit] = useState<{ max: number; maxBytes: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadError, setLoadError] = useState("");
+  // Sticker deletion used window.confirm; the desktop shell is Electron, where a
+  // native modal looks nothing like the app, so it is an in-app dialog now.
+  const [pendingDelete, setPendingDelete] = useState<CustomSticker | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const active = EMOJI_GROUPS.find((item) => item.name === group) ?? EMOJI_GROUPS[0];
@@ -69,9 +73,6 @@ export function EmojiPicker({ onEmoji, onSticker, onClose, onError }: EmojiPicke
   };
 
   const removeSticker = async (sticker: CustomSticker) => {
-    if (!window.confirm(`删除贴纸「${sticker.name || sticker.id}」？已发出去的消息会显示成文字。`)) {
-      return;
-    }
     setBusy(true);
     try {
       await api.deleteCustomSticker(sticker.id);
@@ -202,7 +203,7 @@ export function EmojiPicker({ onEmoji, onSticker, onClose, onError }: EmojiPicke
                       className="sticker-del"
                       title="删除这个贴纸"
                       disabled={busy}
-                      onClick={() => void removeSticker(sticker)}
+                      onClick={() => setPendingDelete(sticker)}
                     >
                       ×
                     </button>
@@ -222,6 +223,22 @@ export function EmojiPicker({ onEmoji, onSticker, onClose, onError }: EmojiPicke
             {limit ? Math.round(limit.maxBytes / 1024) : 1024} KB。
           </p>
         </div>
+      )}
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="删除贴纸"
+          message={`删除贴纸「${pendingDelete.name || pendingDelete.id}」？已发出去的消息会显示成文字，不会变成坏图。`}
+          confirmLabel="删除"
+          danger
+          busy={busy}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => {
+            const sticker = pendingDelete;
+            setPendingDelete(null);
+            void removeSticker(sticker);
+          }}
+        />
       )}
     </div>
   );

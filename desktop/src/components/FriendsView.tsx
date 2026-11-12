@@ -2,6 +2,7 @@ import { useState } from "react";
 import * as api from "../lib/api";
 import type { Friend, FriendRequestRow, SearchItem } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 interface FriendsViewProps {
   me: string;
@@ -34,6 +35,9 @@ export function FriendsView({
   const [results, setResults] = useState<SearchItem[]>([]);
   const [searching, setSearching] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  // Removing a friend used window.confirm; the desktop shell is Electron, where a
+  // native modal looks out of place, so it is an in-app dialog now.
+  const [pendingRemove, setPendingRemove] = useState<Friend | null>(null);
 
   const runSearch = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -259,16 +263,7 @@ export function FriendsView({
                       type="button"
                       className="ghost-btn danger"
                       disabled={busy === `rm:${friend.username}`}
-                      onClick={() => {
-                        if (!window.confirm(`确定删除好友 ${friend.username}？聊天记录会保留。`)) {
-                          return;
-                        }
-                        void act(
-                          `rm:${friend.username}`,
-                          () => api.removeFriend(friend.username),
-                          `已删除好友 ${friend.username}`,
-                        );
-                      }}
+                      onClick={() => setPendingRemove(friend)}
                     >
                       删除
                     </button>
@@ -280,6 +275,26 @@ export function FriendsView({
         </section>
       </div>
       <footer className="panel-footer">当前登录：@{me}</footer>
+
+      {pendingRemove && (
+        <ConfirmDialog
+          title="删除好友"
+          message={`确定删除好友 ${pendingRemove.username}？聊天记录会保留，重新加回来还能看到。`}
+          confirmLabel="删除"
+          danger
+          busy={busy === `rm:${pendingRemove.username}`}
+          onCancel={() => setPendingRemove(null)}
+          onConfirm={() => {
+            const friend = pendingRemove;
+            setPendingRemove(null);
+            void act(
+              `rm:${friend.username}`,
+              () => api.removeFriend(friend.username),
+              `已删除好友 ${friend.username}`,
+            );
+          }}
+        />
+      )}
     </section>
   );
 }

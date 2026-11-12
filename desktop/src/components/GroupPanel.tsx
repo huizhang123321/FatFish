@@ -8,6 +8,7 @@ import type {
   JoinRequestIncoming,
 } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 interface GroupPanelProps {
   privateId: number;
@@ -117,10 +118,26 @@ export function GroupPanel({
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1600);
     } catch {
-      // Clipboard needs a secure context and permission; fall back to selecting.
-      window.prompt("复制群号（Ctrl+C）：", groupNo);
+      // No clipboard permission. window.prompt is not available in Electron, so
+      // point at the number already on screen instead of trying to show it.
+      notify("复制失败：请手动选中上面的群号（Ctrl+C）", "error");
     }
   };
+
+  /**
+   * The action waiting for confirmation, if any.
+   *
+   * These used to be ``window.confirm`` / ``window.prompt``. The prompt ones were
+   * simply broken in the desktop shell (Electron does not implement it), which is
+   * why disbanding a group appeared to do nothing at all.
+   */
+  const [pending, setPending] = useState<
+    | { kind: "transfer"; username: string }
+    | { kind: "remove"; username: string }
+    | { kind: "leave" }
+    | { kind: "disband" }
+    | null
+  >(null);
 
   return (
     <aside className="dock">
@@ -349,20 +366,7 @@ export function GroupPanel({
                           className="mini-btn"
                           disabled={busy !== ""}
                           title="转让群主"
-                          onClick={() => {
-                            if (
-                              !window.confirm(
-                                `确定把群主转让给 ${member.username}？转让后你会变成管理员。`,
-                              )
-                            ) {
-                              return;
-                            }
-                            void run(
-                              `transfer:${member.username}`,
-                              () => api.transferOwnership(privateId, member.username),
-                              "群主已转让",
-                            );
-                          }}
+                          onClick={() => setPending({ kind: "transfer", username: member.username })}
                         >
                           转让群主
                         </button>
@@ -373,14 +377,7 @@ export function GroupPanel({
                           className="mini-btn danger"
                           disabled={busy !== ""}
                           title="移出群组"
-                          onClick={() => {
-                            if (!window.confirm(`确定把 ${member.username} 移出群组？`)) return;
-                            void run(
-                              `rm:${member.username}`,
-                              () => api.removeMember(privateId, member.username),
-                              "已移出群组",
-                            );
-                          }}
+                          onClick={() => setPending({ kind: "remove", username: member.username })}
                         >
                           移出
                         </button>
@@ -435,15 +432,7 @@ export function GroupPanel({
               type="button"
               className="ghost-btn danger"
               disabled={busy !== ""}
-              onClick={() => {
-                if (!window.confirm(`确定离开「${title}」？`)) return;
-                // Only navigate away once the server confirms: a refused leave
-                // (e.g. an owner who has not transferred yet) must keep the
-                // channel open so the reason in the toast still makes sense.
-                void run("leave", () => api.leaveChannel(privateId), "已离开").then((ok) => {
-                  if (ok) onLeft();
-                });
-              }}
+              onClick={() => setPending({ kind: "leave" })}
             >
               离开
             </button>
@@ -454,28 +443,77 @@ export function GroupPanel({
               type="button"
               className="ghost-btn danger"
               disabled={busy !== ""}
-              onClick={() => {
-                const typed = window.prompt(
-                  `解散后无法恢复。请输入群名「${title}」以确认：`,
-                  "",
-                );
-                if (typed === null) return;
-                if (typed !== title) {
-                  notify("群名不一致，未执行解散", "error");
-                  return;
-                }
-                void run("disband", () => api.disbandGroup(privateId, title), "群组已解散").then(
-                  (ok) => {
-                    if (ok) onLeft();
-                  },
-                );
-              }}
+              onClick={() => setPending({ kind: "disband" })}
             >
               解散群组
             </button>
           )}
         </section>
       </div>
+
+      {pending && (
+        <ConfirmDialog
+          title={
+            pending.kind === "disband"
+              ? "解散群组"
+              : pending.kind === "leave"
+                ? "离开群组"
+                : pending.kind === "transfer"
+                  ? "转让群主"
+                  : "移出成员"
+          }
+          message={
+            pending.kind === "disband"
+              ? `解散后群组、聊天记录和附件都会被删除，无法恢复。请输入群名「${title}」确认。`
+              : pending.kind === "leave"
+                ? `确定离开「${title}」？离开后将看不到之后的消息，重新加入需要他人邀请。`
+                : pending.kind === "transfer"
+                  ? `确定把群主转让给 ${pending.username}？转让后你会变成管理员。`
+                  : `确定把 ${pending.username} 移出群组？`
+          }
+          confirmLabel={
+            pending.kind === "disband"
+              ? "解散"
+              : pending.kind === "leave"
+                ? "离开"
+                : pending.kind === "transfer"
+                  ? "转让"
+                  : "移出"
+          }
+          danger
+          requireText={pending.kind === "disband" ? title : undefined}
+          inputLabel="群名"
+          onCancel={() => setPending(null)}
+          onConfirm={() => {
+            const action = pending;
+            setPending(null);
+            if (action.kind === "disband") {
+              // Only navigate away once the server confirms.
+              void run("disband", () => api.disbandGroup(privateId, title), "群组已解散").then(
+                (ok) => {
+                  if (ok) onLeft();
+                },
+              );
+            } else if (action.kind === "leave") {
+              void run("leave", () => api.leaveChannel(privateId), "已离开").then((ok) => {
+                if (ok) onLeft();
+              });
+            } else if (action.kind === "transfer") {
+              void run(
+                `transfer:${action.username}`,
+                () => api.transferOwnership(privateId, action.username),
+                "群主已转让",
+              );
+            } else {
+              void run(
+                `rm:${action.username}`,
+                () => api.removeMember(privateId, action.username),
+                "已移出群组",
+              );
+            }
+          }}
+        />
+      )}
     </aside>
   );
 }

@@ -1890,3 +1890,22 @@ input[type="checkbox"] {
     border-left: 0;
   }
 }
+/* ── Confirmation dialog ─────────────────────────────────────────────────── */
+
+.confirm-message {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+/* Destructive confirmation. Keeps the shape of .primary-btn so the two buttons
+   in the footer still read as a pair, and only the colour says "careful". */
+.primary-btn.danger {
+  background: linear-gradient(180deg, var(--danger) 0%, #8f2031 100%);
+  color: #fff;
+}
+.primary-btn.danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

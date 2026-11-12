@@ -27,6 +27,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ChatPane } from "../src/components/ChatPane";
+import { ConfirmDialog } from "../src/components/ConfirmDialog";
 import { FriendsView } from "../src/components/FriendsView";
 import { GroupPanel } from "../src/components/GroupPanel";
 import { LoginScreen } from "../src/components/LoginScreen";
@@ -631,6 +632,35 @@ check("renders the join dialog with one box for number or name", () => {
   assertContains(html, 'disabled=""', "send button starts disabled");
 });
 
+check("renders the confirmation dialog and gates it on the typed text", () => {
+  const plain = renderToStaticMarkup(
+    <ConfirmDialog
+      title="移出成员"
+      message="确定把 bob 移出群组？"
+      confirmLabel="移出"
+      danger
+      onConfirm={noop}
+      onCancel={noop}
+    />,
+  );
+  assertContains(plain, "移出成员", "dialog title");
+  assertContains(plain, "确定把 bob 移出群组", "message");
+  assertContains(plain, "primary-btn danger", "destructive styling");
+
+  // Typing the group name is required before the confirm button unlocks.
+  const typed = renderToStaticMarkup(
+    <ConfirmDialog
+      title="解散群组"
+      message="解散后无法恢复"
+      requireText="周末联机"
+      inputLabel="群名"
+      onConfirm={noop}
+      onCancel={noop}
+    />,
+  );
+  assertContains(typed, "群名", "input label");
+  assertContains(typed, 'disabled=""', "confirm starts disabled");
+});
 console.log("\n=== formatting helpers ===");
 check("DM titles join participants", () => {
   assert(dmTitle(["bob", "carol"]) === "bob、carol", `got ${dmTitle(["bob", "carol"])}`);

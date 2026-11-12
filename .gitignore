@@ -88,3 +88,7 @@ desktop.ini
 # Downloaded copy used only to compare hashes with a release asset.
 .dlcheck/
 
+
+# Scratch file for a multi-line commit message.
+.commitmsg
+

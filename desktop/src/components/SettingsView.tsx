@@ -4,6 +4,7 @@ import { formatDay } from "../lib/format";
 import type { Theme } from "../lib/theme";
 import type { ApiToken, DesktopConnection, MyProfile } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 interface SettingsViewProps {
   me: string;
@@ -340,6 +341,9 @@ function ApiAccessSection({ notify }: ApiAccessSectionProps) {
   const [busy, setBusy] = useState("");
   const [loading, setLoading] = useState(true);
   const [showHelp, setShowHelp] = useState(false);
+  // Revoking used window.confirm; the desktop shell is Electron, where a native
+  // modal looks out of place, so it is an in-app dialog now.
+  const [pendingRevoke, setPendingRevoke] = useState<ApiToken | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -374,7 +378,6 @@ function ApiAccessSection({ notify }: ApiAccessSectionProps) {
   };
 
   const revoke = async (token: ApiToken) => {
-    if (!window.confirm(`撤销令牌「${token.label}」？使用它的程序会立即失效。`)) return;
     setBusy(`revoke:${token.id}`);
     try {
       await api.revokeApiToken(token.id);
@@ -477,7 +480,7 @@ function ApiAccessSection({ notify }: ApiAccessSectionProps) {
                 type="button"
                 className="ghost-btn danger"
                 disabled={busy === `revoke:${token.id}`}
-                onClick={() => void revoke(token)}
+                onClick={() => setPendingRevoke(token)}
               >
                 撤销
               </button>
@@ -497,6 +500,22 @@ function ApiAccessSection({ notify }: ApiAccessSectionProps) {
   -H "Authorization: Bearer <你的令牌>" \\
   -H "Content-Type: application/json" \\
   -d "{\\"channel\\": \\"general\\", \\"text\\": \\"构建完成\\"}"`}</pre>
+      )}
+
+      {pendingRevoke && (
+        <ConfirmDialog
+          title="撤销令牌"
+          message={`撤销令牌「${pendingRevoke.label}」？使用它的程序会立即失效，无法恢复。`}
+          confirmLabel="撤销"
+          danger
+          busy={busy === `revoke:${pendingRevoke.id}`}
+          onCancel={() => setPendingRevoke(null)}
+          onConfirm={() => {
+            const token = pendingRevoke;
+            setPendingRevoke(null);
+            void revoke(token);
+          }}
+        />
       )}
     </section>
   );
