@@ -92,3 +92,7 @@ desktop.ini
 # Scratch file for a multi-line commit message.
 .commitmsg
 
+
+# Local screenshot used when reporting the app's state.
+.app-window.png
+

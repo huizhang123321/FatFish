@@ -20,7 +20,7 @@
   "audit_log_max_age_days": 30,
   "audit_log_backups": 12,
   "rate_limit_enabled": true,
-  "max_event_streams_per_user": 12,
+  "max_event_streams_per_user": 1000,
   "rate_limits": {
     "login": [60, 60],
     "signup": [20, 3600],

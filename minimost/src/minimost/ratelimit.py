@@ -97,9 +97,14 @@ DEFAULT_LIMITS = {
     "group_join_request": (10, 3600),
 }
 
-# Default cap on concurrently-open /events SSE streams per user. A browser holds
-# one stream per open tab, so this allows a comfortable dozen tabs while still
-# stopping a single actor from pinning every worker thread.
+# Fallback cap on concurrently-open /events SSE streams per user, used only when
+# settings.json is missing or unreadable. A browser holds one stream per open tab,
+# so this allows a comfortable dozen tabs while still stopping a single actor from
+# pinning every worker thread.
+#
+# The shipped settings.json sets a much higher ceiling (see
+# ``max_event_streams_per_user``) because this deployment is a handful of people on
+# one machine; the conservative number here is the safety net, not the policy.
 DEFAULT_MAX_EVENT_STREAMS = 12
 
 # Keys with no recorded event newer than this many seconds are dropped during an
