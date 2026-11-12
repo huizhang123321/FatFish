@@ -395,7 +395,16 @@ export default function App() {
         await api.markRead(channelId).catch(() => undefined);
       } catch (err) {
         if (!cancelled) {
-          notify(err instanceof Error ? err.message : "读取消息失败", "error");
+          // A 404 means the conversation is gone: the group was disbanded, or this
+          // account was removed from it. Showing an empty pane would read as "the
+          // app stopped responding", so say what happened and drop the selection.
+          if (err instanceof api.ApiError && err.status === 404) {
+            notify("这个群已经被解散，或者你已不在其中", "error");
+            setActiveId(null);
+            void reloadLists();
+          } else {
+            notify(err instanceof Error ? err.message : "读取消息失败", "error");
+          }
         }
       } finally {
         if (!cancelled) setLoadingMessages(false);
@@ -405,7 +414,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [phase, activeChannelId, notify]);
+  }, [phase, activeChannelId, notify, reloadLists]);
 
   // ── Live updates ────────────────────────────────────────────────────────
   const handlers = useMemo(

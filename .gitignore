@@ -84,3 +84,7 @@ desktop.ini
 # Leftover from repacking the Electron asar during a hot patch.
 .app.asar
 .app.asar.old
+
+# Downloaded copy used only to compare hashes with a release asset.
+.dlcheck/
+

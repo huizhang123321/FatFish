@@ -4544,19 +4544,21 @@ def group_transfer_ownership(channel_id):
 @chat_bp.route("/groups/<int:channel_id>", methods=["DELETE"])
 @auth.login_required
 def group_disband(channel_id):
-    """Disband a group (owner only).
+    """Disband a group (owner only), erasing its transcript.
 
     Route: ``DELETE /groups/<channel_id>``
 
     JSON body: ``{"confirm": "<exact group name>"}`` — the name must match, so a
     mis-click cannot destroy a group.
 
-    Removes the membership rows and the channel row. The message transcript is
-    deliberately **kept** in the shared messages table (consistent with upstream
-    leaving an emptied room intact, and with retention being the thing that
-    prunes history); once the channel row is gone nobody can resolve
-    ``private:<id>``, so the history is unreachable rather than deleted, and the
-    normal retention/size-cap cleanup reclaims it later.
+    Everything the group owned is removed: the membership rows, the channel row,
+    the transcript, its read state, its pending join requests, and the files those
+    messages carried. Leaving the transcript behind was the earlier behaviour, on
+    the reasoning that a vanished channel makes history unreachable anyway — but
+    "unreachable" is not "gone", and a disbanded group whose messages still sat in
+    the database kept showing up as a conversation other members could click, only
+    to get nothing back. Disband is the one destructive action in the app, so it
+    destroys.
 
     :returns: ``"ok"``; ``404`` unknown group, ``403`` not the owner, ``400``
         confirmation does not match the group name.
@@ -4586,6 +4588,9 @@ def group_disband(channel_id):
         pdb.execute(
             "DELETE FROM private_channel_members WHERE channel_id = ?", (channel_id,)
         )
+        pdb.execute(
+            "DELETE FROM group_join_requests WHERE channel_id = ?", (channel_id,)
+        )
         pdb.execute("DELETE FROM private_channels WHERE id = ?", (channel_id,))
         pdb.commit()
     except Exception:
@@ -4594,6 +4599,43 @@ def group_disband(channel_id):
     finally:
         pdb.close()
 
+    # The transcript lives in the shared message database, not in presence.db, so
+    # it is cleared separately. Attachments are files, so collect them first and
+    # unlink afterwards -- a failure to delete one file must not abort the cleanup.
+    channel = f"{PRIVATE_CHANNEL_PREFIX}{channel_id}"
+    orphaned: List[str] = []
+    db = get_db()
+    try:
+        orphaned = [
+            r[0]
+            for r in db.execute(
+                "SELECT filename FROM messages WHERE channel = ? AND filename IS NOT NULL",
+                (channel,),
+            ).fetchall()
+        ]
+        db.execute(
+            "DELETE FROM reactions WHERE message_id IN"
+            " (SELECT id FROM messages WHERE channel = ?)",
+            (channel,),
+        )
+        db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
+        db.execute("DELETE FROM read_state WHERE channel = ?", (channel,))
+        db.commit()
+    finally:
+        db.close()
+
+    for name in orphaned:
+        try:
+            (UPLOAD_DIR / name).unlink()
+        except OSError:
+            pass
+
+    audit.log_event(
+        "group_disband",
+        "success",
+        user=user,
+        detail=f"group {channel_id} ({len(orphaned)} attachment(s) removed)",
+    )
     return "ok"
 
 
