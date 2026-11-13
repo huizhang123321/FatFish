@@ -1,0 +1,50 @@
+FatFish 第三方组件与上游署名
+============================
+
+FatFish 是 MiniMost 的衍生作品。MIT 协议要求原版权声明随软件一起分发，因此
+这里保留上游的完整声明；`minimost/LICENSE` 中也原样保留了同一份文本。
+
+--------------------------------------------------------------------------------
+MiniMost
+https://github.com/SamuelDonovan/minimost
+
+MIT License
+
+Copyright (c) 2026 Samuel Mehalko
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+本仓库自己写的部分（Electron 外壳、React/TypeScript 界面、打包脚本、文档）
+
+MIT License，Copyright (c) 2026 FatFish contributors —— 见仓库根目录 LICENSE。
+
+--------------------------------------------------------------------------------
+运行时依赖
+
+- Electron（MIT）
+- React / React DOM（MIT）
+- Flask（BSD-3-Clause）
+- Werkzeug（BSD-3-Clause）
+- PyInstaller（GPL-2.0-or-later，**仅用于构建**：它把 Python 解释器与依赖打包成
+  单个可执行文件，构建产物按 GPL 的"聚合"条款分发，不改变本项目源码的 MIT 授权；
+  如果在意这一点，可以改用源码方式运行，不经过 PyInstaller）
+- NSIS（zlib/libpng，仅用于构建安装包）
+
+图标与贴纸为项目原创绘制，不含任何第三方聊天软件的素材或商标。

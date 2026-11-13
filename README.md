@@ -87,7 +87,9 @@ secret.key       会话密钥
 它在 [MiniMost](https://github.com/SamuelDonovan/minimost)（作者 Samuel Mehalko，同样 MIT）
 的基础上二次开发：FatFish 增加了 Electron 桌面外壳、React/TypeScript 界面、群组与群号、
 语音与文件附件、表情贴纸、API 接入服务、日夜主题，以及 PyInstaller + NSIS 的打包链路。
-上游的授权原文保留在 [`minimost/LICENSE`](minimost/LICENSE)，并已在本项目 LICENSE 中一并附上。
+
+上游的版权声明、运行时依赖的授权情况见 [NOTICE](NOTICE)；上游原文也保留在
+[`minimost/LICENSE`](minimost/LICENSE)。
 
 界面与贴纸素材（`minimost/src/minimost/static/stickers/`、`packaging/` 下的图标等）
 均为本项目原创绘制，不包含任何第三方聊天软件的素材或商标。
