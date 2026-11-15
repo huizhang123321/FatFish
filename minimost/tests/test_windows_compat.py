@@ -118,7 +118,7 @@ def _docstring_nodes(tree):
 
 def _scan_file(path):
     """Return a list of human-readable Windows-compatibility violations."""
-    source = path.read_text()
+    source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     try:
         rel = path.relative_to(_SRC.parent.parent)

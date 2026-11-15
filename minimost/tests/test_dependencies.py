@@ -16,7 +16,7 @@ def _collect_third_party_imports(path: Path) -> dict[str, set[str]]:
     """Return a mapping of file -> set of third-party top-level packages imported."""
     results: dict[str, set[str]] = {}
     for py_file in path.rglob("*.py"):
-        tree = ast.parse(py_file.read_text(), filename=str(py_file))
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
         third_party: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
