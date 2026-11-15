@@ -117,8 +117,14 @@ export default function App() {
   }, [toast]);
 
   // Keep <html data-theme> and the saved choice in step with the selection.
+  //
+  // The first application is instant (index.html already painted the right
+  // palette before React ran); every later change cross-fades, which is what makes
+  // the day↔night switch read as one movement instead of a flash.
+  const themeAppliedRef = useRef(false);
   useEffect(() => {
-    applyTheme(theme);
+    applyTheme(theme, { animate: themeAppliedRef.current });
+    themeAppliedRef.current = true;
     saveTheme(theme);
   }, [theme]);
 

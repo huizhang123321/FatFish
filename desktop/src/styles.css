@@ -29,6 +29,27 @@
   --mono: "Cascadia Mono", Consolas, "Courier New", monospace;
 }
 
+/* ── 日间/夜间切换的渐变 ─────────────────────────────────────────────────────
+   `theme.ts` 在切换前给 <html> 加上 .theme-fading，320ms 后移除。过渡只在
+   这一小段时间内挂上：如果常驻，全站每个元素的 hover、列表刷新都会变成"慢半
+   拍"的动画，而用户只想要切换主题时那一下。
+
+   只过渡颜色类属性（背景/文字/边框/阴影/图标填充），不碰尺寸与布局属性，避免
+   切换时页面抖动。`prefers-reduced-motion` 的用户由 theme.ts 直接跳过动画。 */
+.theme-fading,
+.theme-fading *,
+.theme-fading *::before,
+.theme-fading *::after {
+  transition:
+    background-color 320ms ease,
+    color 320ms ease,
+    border-color 320ms ease,
+    outline-color 320ms ease,
+    box-shadow 320ms ease,
+    fill 320ms ease,
+    stroke 320ms ease !important;
+  transition-delay: 0s !important;
+}
 /* ── 日间模式 ──────────────────────────────────────────────────────────────
    Everything the layout needs is expressed through the variables above, so the
    day theme is the same interface with a light palette rather than a second set

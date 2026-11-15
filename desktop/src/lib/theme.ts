@@ -38,18 +38,53 @@ export function saveTheme(theme: Theme): void {
   }
 }
 
+/** How long the day↔night cross-fade runs. Matches `.theme-fading` in styles.css. */
+export const THEME_FADE_MS = 320;
+
+/** True when the user asked the OS to avoid animations. */
+function prefersReducedMotion(): boolean {
+  try {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Apply the theme to the document.
  *
  * Dark is the absence of the attribute rather than `data-theme="dark"`, so the
  * default rules in styles.css are the dark palette and there is exactly one place
  * that defines a second one.
+ *
+ * With ``animate`` the colours cross-fade instead of flipping: a ``.theme-fading``
+ * class on `<html>` turns on colour transitions for every element (see styles.css),
+ * and it is removed once the fade is over so hover states stay instant the rest of
+ * the time. A class rather than a permanent transition because a global
+ * ``transition: background-color`` makes every hover and list update feel late.
+ *
+ * ``animate`` is deliberately opt-in: the first paint must not fade in, and a
+ * reload should land on the right colours immediately.
  */
-export function applyTheme(theme: Theme): void {
+export function applyTheme(theme: Theme, options: { animate?: boolean } = {}): void {
   const root = document.documentElement;
+  const animate = options.animate === true && !prefersReducedMotion();
+
+  if (animate) {
+    root.classList.add("theme-fading");
+    // Force a style recalculation so the transition is armed *before* the colours
+    // change; without it the browser batches both edits and nothing animates.
+    void root.offsetWidth;
+  }
+
   if (theme === "light") {
     root.dataset.theme = "light";
   } else {
     delete root.dataset.theme;
   }
+
+  if (animate) {
+    window.setTimeout(() => root.classList.remove("theme-fading"), THEME_FADE_MS + 80);
+  }
 }
+
