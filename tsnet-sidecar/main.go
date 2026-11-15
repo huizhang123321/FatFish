@@ -4,8 +4,8 @@
 // It embeds an official Tailscale node (tailscale.com/tsnet) inside this process,
 // listens on the tailnet, and forwards every accepted connection to the local
 // FatFish server. Nothing is exposed to the LAN or the internet: the only way in
-// is the tailnet, which is already end-to-end encrypted and access-controlled by
-// the tailnet's ACLs.
+// is the tailnet, which is already encrypted and access-controlled by the
+// tailnet's ACLs.
 //
 // Why a separate process instead of inside the Python app: tsnet is a Go library,
 // and FatFish's server is Python. A sidecar keeps the Python side untouched -- it
@@ -40,17 +40,18 @@ import (
 // status is what the shell reads to render the "远程访问" section. It is written
 // atomically (temp file + rename) so a reader never sees half a JSON document.
 type status struct {
-	State     string   `json:"state"` // starting | login_required | running | stopped | error
-	Hostname  string   `json:"hostname,omitempty"`
-	Port      int      `json:"port"`
-	Target    string   `json:"target"`
-	LoginURL  string   `json:"login_url,omitempty"`
-	Addresses []string `json:"addresses,omitempty"`
-	URL       string   `json:"url,omitempty"`
-	Error     string   `json:"error,omitempty"`
-	Conns     int64    `json:"connections"`
-	Since     string   `json:"since,omitempty"`
-	PID       int      `json:"pid"`
+	State    string   `json:"state"`                   // starting | login_required | running | stopped | error
+	Backend  string   `json:"backend_state,omitempty"` // raw ipn state, for diagnostics
+	Hostname string   `json:"hostname,omitempty"`
+	Port     int      `json:"port"`
+	Target   string   `json:"target"`
+	LoginURL string   `json:"login_url,omitempty"`
+	Addrs    []string `json:"addresses,omitempty"`
+	URL      string   `json:"url,omitempty"`
+	Error    string   `json:"error,omitempty"`
+	Conns    int64    `json:"connections"`
+	Since    string   `json:"since,omitempty"`
+	PID      int      `json:"pid"`
 }
 
 type reporter struct {
@@ -68,6 +69,12 @@ func (r *reporter) set(fn func(*status)) {
 
 func (r *reporter) writeLocked() {
 	r.st.Conns = atomic.LoadInt64(&connCount)
+	// An empty path means "do not persist": the unit tests exercise the proxy
+	// without touching the filesystem, which also keeps their cleanup from failing
+	// on a machine where the temp directory is not writable.
+	if r.path == "" {
+		return
+	}
 	data, err := json.MarshalIndent(r.st, "", "  ")
 	if err != nil {
 		return
@@ -84,45 +91,60 @@ func (r *reporter) writeLocked() {
 
 var connCount int64
 
-// loginWatcher captures the interactive login URL that tsnet prints when no auth
-// key is configured. Without this the user would never see it: the shell starts
-// this process without a console, so the URL is only reachable through the log
-// file and the status document.
-type loginWatcher struct {
-	mu  sync.Mutex
-	url string
+// listener is set once the node is up, so shutdown can close it from main.
+var listener atomic.Pointer[net.Listener]
+
+// teeWriter sends log lines to a file, and to stderr only when stderr is a real
+// console.
+//
+// The distinction is not cosmetic. The shell spawns this process with stderr
+// redirected to a pipe nobody drains, so writing there blocks once the pipe buffer
+// fills -- and because tsnet logs from inside its own locks, one blocked write
+// froze the entire backend: the node stayed at "starting", with no login URL and
+// no error, on a network that was working the whole time. Writing to the file the
+// shell polls avoids that; an interactive run still gets console output.
+type teeWriter struct {
+	files   []string
+	console bool
+	mu      sync.Mutex
 }
 
-func (w *loginWatcher) Logf(format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	log.Print(msg)
-	if strings.Contains(msg, "https://login.tailscale.com") {
-		if i := strings.Index(msg, "https://"); i >= 0 {
-			url := strings.TrimSpace(msg[i:])
-			if j := strings.IndexAny(url, " \t"); j >= 0 {
-				url = url[:j]
-			}
-			w.mu.Lock()
-			w.url = url
-			w.mu.Unlock()
+func newTeeWriter(file string) *teeWriter {
+	console := false
+	if info, err := os.Stderr.Stat(); err == nil {
+		console = info.Mode()&os.ModeCharDevice != 0
+	}
+	return &teeWriter{files: []string{file}, console: console}
+}
+
+func (t *teeWriter) Write(p []byte) (int, error) {
+	for _, name := range t.files {
+		f, err := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			continue
+		}
+		_, _ = f.Write(p)
+		_ = f.Close()
+	}
+	if t.console {
+		t.mu.Lock()
+		_, err := os.Stderr.Write(p)
+		t.mu.Unlock()
+		if err != nil {
+			return 0, err
 		}
 	}
-}
-
-func (w *loginWatcher) URL() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.url
+	return len(p), nil
 }
 
 func main() {
 	var (
-		state    = flag.String("state", "", "directory for the node's state (required)")
-		hostname = flag.String("hostname", "fatfish", "name this node gets on the tailnet")
-		authKey  = flag.String("authkey", "", "Tailscale auth key; empty means interactive login")
-		port     = flag.Int("port", 80, "port to listen on inside the tailnet")
-		target   = flag.String("target", "127.0.0.1:5100", "local FatFish server to forward to")
-		statusFn = flag.String("status", "", "path of the status JSON to keep up to date")
+		state     = flag.String("state", "", "directory for the node's state (required)")
+		hostname  = flag.String("hostname", "fatfish", "name this node gets on the tailnet")
+		authKey   = flag.String("authkey", "", "Tailscale auth key; empty means interactive login")
+		port      = flag.Int("port", 80, "port to listen on inside the tailnet")
+		target    = flag.String("target", "127.0.0.1:5100", "local FatFish server to forward to")
+		statusFn  = flag.String("status", "", "path of the status JSON to keep up to date")
 		ephemeral = flag.Bool("ephemeral", false, "remove the node when it goes offline")
 	)
 	flag.Parse()
@@ -152,8 +174,7 @@ func main() {
 	}
 	rep.set(func(*status) {})
 
-	watch := &loginWatcher{}
-	log.SetOutput(&teeWriter{files: []string{filepath.Join(*state, "tsnet.log")}})
+	log.SetOutput(newTeeWriter(filepath.Join(*state, "tsnet.log")))
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[tsnet] ")
 
@@ -162,127 +183,116 @@ func main() {
 		Hostname:  *hostname,
 		AuthKey:   *authKey,
 		Ephemeral: *ephemeral,
-		Logf:      watch.Logf,
+		Logf:      log.Printf,
+		UserLogf:  log.Printf,
 	}
 	defer srv.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Up blocks until the node is authenticated and connected. With no auth key
-	// it returns an error and the login URL arrives through Logf, which is why the
-	// URL is also written to the status file below.
-	upErr := make(chan error, 1)
+	// Up blocks until the node is authenticated and connected. It is not the way to
+	// learn *why* we are not connected -- that is the status poll below.
 	go func() {
-		_, err := srv.Up(ctx)
-		upErr <- err
+		if _, err := srv.Up(ctx); err != nil {
+			log.Printf("up: %v", err)
+		}
 	}()
 
+	// The login URL is NOT in the logs: tsnet keeps it in the client status as
+	// AuthURL. The first version of this file scraped the log for it and therefore
+	// never found it -- the node sat at "starting" forever while the network was
+	// perfectly fine. Polling the client also gives the backend state and, once
+	// authenticated, the assigned tailnet addresses.
 	go func() {
-		// Publish the login URL as soon as it appears, without waiting for Up to
-		// return: the user needs the link while the node is still unauthenticated.
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if url := watch.URL(); url != "" {
-					rep.set(func(s *status) {
-						if s.LoginURL != url {
-							s.LoginURL = url
-							if s.State == "starting" {
-								s.State = "login_required"
-							}
-						}
-					})
-				}
 			}
-		}
-	}()
 
-	select {
-	case err := <-upErr:
-		if err != nil {
-			url := watch.URL()
-			msg := err.Error()
+			lc, err := srv.LocalClient()
+			if err != nil {
+				continue
+			}
+			st, err := lc.Status(ctx)
+			if err != nil || st == nil {
+				continue
+			}
+
+			var addrs []string
+			for _, ip := range st.TailscaleIPs {
+				addrs = append(addrs, ip.String())
+			}
+			host := strings.TrimSuffix(st.Self.DNSName, ".")
+			backend := st.BackendState
+			authURL := st.AuthURL
+
 			rep.set(func(s *status) {
-				s.Error = msg
-				s.LoginURL = url
-				if url != "" {
+				s.Backend = backend
+				if host != "" {
+					s.Hostname = host
+				}
+				if authURL != "" {
+					s.LoginURL = authURL
+				}
+				if len(addrs) > 0 {
+					s.Addrs = addrs
+					s.State = "running"
+					s.URL = fmt.Sprintf("http://%s:%d/", addrs[0], s.Port)
+					s.LoginURL = ""
+					s.Error = ""
+					return
+				}
+				switch backend {
+				case "NeedsLogin":
 					s.State = "login_required"
-				} else {
-					s.State = "error"
+				case "NeedsMachineAuth":
+					s.State = "login_required"
+					s.Error = "节点已登录，等待管理员在 Tailscale 后台批准"
+				case "Starting":
+					if s.State != "login_required" {
+						s.State = "starting"
+					}
+				case "Stopped":
+					if s.State != "running" {
+						s.State = "stopped"
+					}
 				}
 			})
-			if url == "" {
-				log.Printf("up failed: %v", err)
-				os.Exit(1)
-			}
-			// Unauthenticated but a login URL exists: keep the process alive so the
-			// user can approve the node, then continue once it comes up.
-			log.Printf("waiting for login: %s", url)
-		}
-	case <-time.After(2 * time.Minute):
-		rep.set(func(s *status) { s.Error = "timed out bringing the node up" })
-		log.Printf("timeout waiting for tsnet")
-	}
-
-	// If the first Up failed for want of a login, retry once the user approves.
-	go func() {
-		for i := 0; i < 120; i++ {
-			time.Sleep(5 * time.Second)
-			if _, err := srv.Up(ctx); err == nil {
-				return
-			}
 		}
 	}()
 
-	// Give the node a moment to report its addresses; tsnet exposes them through
-	// LocalClient only after Up succeeds.
+	// Listening is only meaningful once the node is authenticated, and calling
+	// Listen while unauthenticated blocks the very goroutine that drives the login
+	// flow -- which is exactly how the first version of this file sat at
+	// "starting" for ever on a perfectly working network. So: bring the node up
+	// first, and only then start accepting.
 	go func() {
-		for i := 0; i < 60; i++ {
-			lc, err := srv.LocalClient()
-			if err == nil {
-				if st, err := lc.Status(ctx); err == nil {
-					var addrs []string
-					for _, ip := range st.TailscaleIPs {
-						addrs = append(addrs, ip.String())
-					}
-					host := strings.TrimSuffix(st.Self.DNSName, ".")
-					rep.set(func(s *status) {
-						s.Addresses = addrs
-						if host != "" {
-							s.Hostname = host
-						}
-						if len(addrs) > 0 {
-							s.State = "running"
-							s.URL = fmt.Sprintf("http://%s:%d/", addrs[0], s.Port)
-							s.LoginURL = ""
-						}
-					})
-					if len(addrs) > 0 {
-						return
-					}
+		if _, err := srv.Up(ctx); err != nil {
+			log.Printf("up: %v", err)
+			rep.set(func(s *status) {
+				if s.State != "running" {
+					s.Error = err.Error()
 				}
-			}
-			time.Sleep(2 * time.Second)
+			})
+			return
 		}
-	}()
+		ln, err := srv.Listen("tcp", fmt.Sprintf(":%d", *port))
+		if err != nil {
+			rep.set(func(s *status) {
+				s.State = "error"
+				s.Error = "listen: " + err.Error()
+			})
+			log.Printf("listen: %v", err)
+			return
+		}
+		log.Printf("listening on tailnet port %d, forwarding to %s", *port, *target)
+		listener.Store(&ln)
 
-	ln, err := srv.Listen("tcp", fmt.Sprintf(":%d", *port))
-	if err != nil {
-		rep.set(func(s *status) {
-			s.State = "error"
-			s.Error = "listen: " + err.Error()
-		})
-		log.Printf("listen: %v", err)
-		os.Exit(1)
-	}
-	log.Printf("listening on tailnet port %d, forwarding to %s", *port, *target)
-
-	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -307,7 +317,9 @@ func main() {
 	<-sig
 	log.Printf("shutting down")
 	rep.set(func(s *status) { s.State = "stopped" })
-	_ = ln.Close()
+	if ln := listener.Load(); ln != nil {
+		_ = (*ln).Close()
+	}
 }
 
 // proxy pipes one tailnet connection to the local server and back.
@@ -348,22 +360,4 @@ func proxy(client net.Conn, target string, rep *reporter) {
 
 	atomic.AddInt64(&connCount, -1)
 	rep.set(func(*status) {})
-}
-
-// teeWriter sends log lines to stderr and to a file, so the shell can show them
-// after the fact even though it never sees this process's console.
-type teeWriter struct {
-	files []string
-}
-
-func (t *teeWriter) Write(p []byte) (int, error) {
-	for _, name := range t.files {
-		f, err := os.OpenFile(name, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err != nil {
-			continue
-		}
-		_, _ = f.Write(p)
-		_ = f.Close()
-	}
-	return os.Stderr.Write(p)
 }
