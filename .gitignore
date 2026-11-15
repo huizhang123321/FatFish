@@ -67,6 +67,20 @@ desktop/node_modules/
 /minimost/src/minimost/desktop_ui/assets/
 /minimost/src/minimost/desktop_ui/index.html
 /minimost/src/minimost/desktop_ui/logo.svg
+/minimost/src/minimost/desktop_ui/.write-probe
+
+# ── Android client ─────────────────────────────────────────────────────────
+# Toolchain and scratch downloads stay local. The small sideload APK is kept
+# as a release artifact; screenshots and app sources are tracked too.
+.android-toolchain/
+.android-repository.xml
+安卓端/.build/
+安卓端/build/
+安卓端/dist/
+!安卓端/dist/
+!安卓端/dist/*.apk
+安卓端/keystore/
+安卓端/.testdata/
 
 # Generated icons (packaging/make_assets.py draws them from code).
 desktop/build/icon.ico
@@ -95,4 +109,15 @@ desktop.ini
 
 # Local screenshot used when reporting the app's state.
 .app-window.png
+
+
+# Go toolchain and module caches used to build the tsnet sidecar, plus its binary.
+# The binary is built from source in tsnet-sidecar/ and shipped inside the
+# installer, so it does not belong in git.
+.tools/
+tsnet-sidecar/tsnet-sidecar.exe
+tsnet-sidecar/tsnet-sidecar
+
+# Manual test state of the tsnet sidecar: contains the node's private key.
+.tsnet-check/
 

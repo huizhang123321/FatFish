@@ -36,4 +36,15 @@ contextBridge.exposeInMainWorld("fatfish", {
 
   /** Open an http(s) link in the user's default browser. */
   openExternal: (url) => ipcRenderer.invoke("fatfish:openExternal", url),
+
+  /**
+   * Embedded Tailscale (tsnet). The shell owns the sidecar process; these just
+   * report its state and start/stop it. Absent in browser mode, which is why the
+   * renderer checks for this object before showing the section.
+   */
+  tsnet: {
+    status: () => ipcRenderer.invoke("fatfish:tsnetStatus"),
+    start: (options) => ipcRenderer.invoke("fatfish:tsnetStart", options),
+    stop: () => ipcRenderer.invoke("fatfish:tsnetStop"),
+  },
 });

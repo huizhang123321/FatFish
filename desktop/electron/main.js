@@ -16,6 +16,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { Backend } = require("./backend");
+const { TsnetManager } = require("./tsnet");
+const { sidecarPath } = require("./tsnet-path");
 const log = require("./log");
 
 /**
@@ -95,6 +97,8 @@ let mainWindow = null;
 
 /** @type {Backend|null} */
 let backend = null;
+/** Owns the optional tsnet sidecar that publishes this node on a tailnet. */
+let tsnet = null;
 
 /** Base URL the window is allowed to navigate within. */
 let baseUrl = "";
@@ -341,6 +345,27 @@ function registerIpc() {
     await shell.openPath(dir);
   });
 
+  // ── Tailscale (tsnet) ────────────────────────────────────────────────────
+  ipcMain.handle("fatfish:tsnetStatus", () => (tsnet ? tsnet.status() : { available: false, state: "off" }));
+
+  ipcMain.handle("fatfish:tsnetStart", (_event, options) => {
+    if (!tsnet) return { ok: false, error: "外壳未初始化 tsnet" };
+    const opts = options || {};
+    const target = (baseUrl || "http://127.0.0.1:5000").replace(/^https?:\/\//, "");
+    const result = tsnet.start({
+      hostname: opts.hostname,
+      authKey: opts.authKey,
+      port: opts.port,
+      target,
+    });
+    log.log(`tsnet start: ok=${result.ok} target=${target} port=${opts.port}`);
+    return result;
+  });
+
+  ipcMain.handle("fatfish:tsnetStop", () => {
+    log.log("tsnet stop requested");
+    return tsnet ? tsnet.stop() : { ok: true };
+  });
   ipcMain.handle("fatfish:openExternal", (_event, url) => {
     if (typeof url === "string" && /^https?:/i.test(url)) shell.openExternal(url);
   });
@@ -374,7 +399,18 @@ if (!gotSingleInstanceLock) {
 } else {
   app.whenReady().then(async () => {
     log.log("app ready");
-    Menu.setApplicationMenu(null);
+        Menu.setApplicationMenu(null);
+
+    // The sidecar is optional: without the binary the IPC still answers, and the
+    // renderer hides the section (see tsnet-path.js for where it looks).
+    const tsnetDir = path.join(app.getPath("userData"), "tsnet");
+    tsnet = new TsnetManager({
+      stateDir: tsnetDir,
+      sidecarPath: sidecarPath(),
+      onLog: (line) => log.log(line),
+    });
+    log.log(`tsnet sidecar=${tsnet.sidecarPath} available=${tsnet.available()}`);
+
     registerIpc();
 
     // FATFISH_URL lets the renderer be developed against a server started by
@@ -416,6 +452,7 @@ if (!gotSingleInstanceLock) {
     event.preventDefault();
     (async () => {
       try {
+        if (tsnet) tsnet.stop();
         if (backend) await backend.stop();
       } finally {
         app.exit(0);

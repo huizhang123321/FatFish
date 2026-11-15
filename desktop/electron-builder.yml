@@ -20,6 +20,7 @@
 # The packaged layout is:
 #   <install dir>/FatFish.exe                  Electron shell
 #   <install dir>/resources/app.asar           electron/main.js + preload.js
+#   <install dir>/resources/tsnet/              tsnet-sidecar.exe (optional feature)
 #   <install dir>/resources/server/            the PyInstaller bundle
 #       minimost-server.exe
 #       minimost/templates, static, migrations, desktop_ui, settings.json
@@ -53,6 +54,12 @@ extraResources:
     to: server
     filter:
       - "**/*"
+  # The embedded Tailscale node (Go + official tsnet). A separate process because
+  # tsnet is a Go library and the server is Python; see desktop/electron/tsnet.js.
+  - from: ../tsnet-sidecar
+    to: tsnet
+    filter:
+      - "tsnet-sidecar.exe"
 
 asar: true
 

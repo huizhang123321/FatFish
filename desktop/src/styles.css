@@ -2053,3 +2053,74 @@ input[type="checkbox"] {
   margin-top: 10px;
   flex-wrap: wrap;
 }
+/* ── 远程访问（Tailscale） ───────────────────────────────────────────────── */
+
+.tsnet-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+  font-size: 13px;
+}
+.tsnet-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+.tsnet-dot.tsnet-running { background: #45d483; box-shadow: 0 0 0 3px rgba(69, 212, 131, 0.16); }
+.tsnet-dot.tsnet-starting { background: var(--warn); }
+.tsnet-dot.tsnet-login_required { background: var(--warn); }
+.tsnet-dot.tsnet-error { background: var(--danger); }
+.tsnet-url {
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-soft);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.tsnet-conns {
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+.tsnet-login {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+.tsnet-login .primary-btn {
+  margin-bottom: 8px;
+}
+.tsnet-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px 12px;
+  margin: 8px 0;
+}
+.field-wide {
+  grid-column: 1 / -1;
+}
+.tsnet-log {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--line-soft);
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.danger-text {
+  color: var(--danger);
+}

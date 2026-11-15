@@ -4,6 +4,7 @@ import { formatDay } from "../lib/format";
 import type { Theme } from "../lib/theme";
 import type { ApiToken, DesktopConnection, MyProfile } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { RemoteAccessSection } from "./RemoteAccessSection";
 import { StorageSection } from "./StorageSection";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -17,6 +18,8 @@ interface SettingsViewProps {
   onReloadProfile: () => void;
   onLogout: () => void;
   notify: (message: string, kind?: "error" | "info") => void;
+  /** Phone layout only: return to the conversation list. */
+  onBack?: () => void;
 }
 
 /** Profile and desktop preferences. */
@@ -30,7 +33,9 @@ export function SettingsView({
   onReloadProfile,
   onLogout,
   notify,
+  onBack,
 }: SettingsViewProps) {
+  const android = typeof window === "undefined" ? undefined : window.fatfishAndroid;
   const [displayName, setDisplayName] = useState("");
   const [color, setColor] = useState("#63d2ff");
   const [serverInput, setServerInput] = useState(desktop?.serverUrl ?? "");
@@ -138,6 +143,20 @@ export function SettingsView({
   return (
     <section className="panel">
       <header className="panel-header">
+        {onBack && (
+          <button type="button" className="mobile-back" onClick={onBack} aria-label="返回">
+            <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+              <path
+                d="M15 5l-7 7 7 7"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        )}
         <h2>设置</h2>
         <span className="panel-hint">@{me}</span>
       </header>
@@ -292,6 +311,24 @@ export function SettingsView({
               </button>
             </div>
           </section>
+        ) : android ? (
+          <section className="panel-block">
+            <h3>安卓客户端</h3>
+            <p className="settings-note">
+              当前连接 <code>{android.getServerUrl()}</code>。切换服务器会回到连接页，
+              账号与聊天记录仍只保存在服务端。
+            </p>
+            <div className="settings-inline">
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={() => android.switchServer()}
+              >
+                切换服务器
+              </button>
+            </div>
+            <p className="settings-note">Android 壳版本 {android.version} · 小米/华为等系统需允许后台网络访问。</p>
+          </section>
         ) : (
           <section className="panel-block">
             <h3>运行模式</h3>
@@ -305,14 +342,17 @@ export function SettingsView({
 
         {/* Last block in the panel: it is the one people look for only when the
             disk is full, so it should not push the everyday settings down. */}
+        <RemoteAccessSection notify={notify} />
+
         <StorageSection notify={notify} />
 
         <section className="panel-block">
           <h3>关于</h3>
           <p className="settings-note">
-            FatFish · 桌面版
+            FatFish · {desktop ? "桌面版" : android ? "安卓版" : "浏览器版"}
             {desktop ? ` ${desktop.appVersion} · Electron ${desktop.electron}` : ""}
-            ；消息、图片与账号全部保存在本机 SQLite 与本地目录中，不上传任何云端。
+            {android ? ` · 壳 ${android.version}` : ""}
+            ；消息、图片与账号全部保存在服务端机器的 SQLite 与本地目录中，不上传任何云端。
           </p>
           <div className="settings-inline">
             <button type="button" className="ghost-btn danger" onClick={onLogout}>

@@ -308,3 +308,22 @@ export interface StorageFreed {
   messages?: number;
   files: number;
 }
+
+/** ``window.fatfish.tsnet.status()`` -- the sidecar's self-report. */
+export interface TsnetStatus {
+  available: boolean;
+  /** off | starting | login_required | running | stopped | error | unknown */
+  state: string;
+  running: boolean;
+  hostname: string;
+  port: number;
+  target: string;
+  login_url: string;
+  url: string;
+  addresses: string[];
+  connections: number;
+  error: string;
+  log_tail: string[];
+  path: string;
+  state_dir: string;
+}
