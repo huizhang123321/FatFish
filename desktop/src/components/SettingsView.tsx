@@ -4,6 +4,7 @@ import { formatDay } from "../lib/format";
 import type { Theme } from "../lib/theme";
 import type { ApiToken, DesktopConnection, MyProfile } from "../lib/types";
 import { Avatar } from "./Avatar";
+import { StorageSection } from "./StorageSection";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 interface SettingsViewProps {
@@ -301,6 +302,10 @@ export function SettingsView({
         )}
 
         <ApiAccessSection notify={notify} />
+
+        {/* Last block in the panel: it is the one people look for only when the
+            disk is full, so it should not push the everyday settings down. */}
+        <StorageSection notify={notify} />
 
         <section className="panel-block">
           <h3>关于</h3>

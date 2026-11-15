@@ -34,6 +34,8 @@ import type {
   MyProfile,
   PrivateChannel,
   SearchResponse,
+  StorageFreed,
+  StorageReport,
   UserSettings,
 } from "./types";
 
@@ -657,4 +659,30 @@ export async function importCustomSticker(
 export async function deleteCustomSticker(id: number): Promise<void> {
   const res = await send(`/stickers/${id}`, { method: "DELETE" });
   if (!res.ok) throw new ApiError(res.status, await describe(res));
+}
+
+// ── Storage ("存储空间") ───────────────────────────────────────────────────
+
+/** What is using disk, broken down by category and conversation. */
+export async function storage(): Promise<StorageReport> {
+  return json<StorageReport>("/storage");
+}
+
+/**
+ * Delete one conversation's history and its attachments.
+ *
+ * The conversation, its members and its roles stay; only the transcript goes,
+ * plus one system line recording who cleared it.
+ */
+export async function purgeConversation(channel: string): Promise<StorageFreed> {
+  const res = await send("/storage/purge", jsonBody("POST", { channel }));
+  if (!res.ok) throw new ApiError(res.status, await describe(res));
+  return (await res.json()) as StorageFreed;
+}
+
+/** Delete attachment files no message references any more. */
+export async function cleanupOrphans(): Promise<StorageFreed> {
+  const res = await send("/storage/orphans", jsonBody("POST", {}));
+  if (!res.ok) throw new ApiError(res.status, await describe(res));
+  return (await res.json()) as StorageFreed;
 }

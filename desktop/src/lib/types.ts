@@ -272,3 +272,39 @@ export interface CustomStickerList {
   max: number;
   max_bytes: number;
 }
+
+/** One conversation's share of the disk. */
+export interface StorageConversation {
+  channel: string;
+  id: number;
+  name: string;
+  kind: "group" | "channel";
+  messages: number;
+  attachments: number;
+  attachment_bytes: number;
+  /** True when the signed-in user may delete this history. */
+  can_purge: boolean;
+}
+
+/** ``GET /storage``. */
+export interface StorageReport {
+  data_dir: string;
+  total_bytes: number;
+  parts: {
+    databases: number;
+    uploads: number;
+    avatars: number;
+    stickers: number;
+    other: number;
+  };
+  files: { uploads: number; avatars: number; stickers: number };
+  conversations: StorageConversation[];
+  orphans: { files: number; bytes: number };
+}
+
+/** ``POST /storage/purge`` / ``POST /storage/orphans``. */
+export interface StorageFreed {
+  freed_bytes: number;
+  messages?: number;
+  files: number;
+}

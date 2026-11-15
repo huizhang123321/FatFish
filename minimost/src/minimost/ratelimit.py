@@ -95,6 +95,9 @@ DEFAULT_LIMITS = {
     # Asking to join. Each request notifies every owner/admin of that group, so a
     # handful per hour is plenty for a person.
     "group_join_request": (10, 3600),
+    # Clearing a conversation's history is destructive and heavy; a person does it
+    # a handful of times at most, so bound it hard.
+    "storage_purge": (10, 3600),
 }
 
 # Fallback cap on concurrently-open /events SSE streams per user, used only when

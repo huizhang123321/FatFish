@@ -65,6 +65,7 @@ from .paths import data_dir
 from .presence import presence_bp
 from .social import social_bp
 from .stickers import stickers_bp
+from .storage import storage_bp
 from .desktop import desktop_bp
 
 _HERE = Path(__file__).resolve().parent
@@ -734,6 +735,7 @@ def create_app():
     app.register_blueprint(presence_bp)
     app.register_blueprint(social_bp)
     app.register_blueprint(stickers_bp)
+    app.register_blueprint(storage_bp)
     app.register_blueprint(desktop_bp)
 
     presence.reset_all_offline()

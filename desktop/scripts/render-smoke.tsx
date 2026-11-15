@@ -28,6 +28,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { ChatPane } from "../src/components/ChatPane";
 import { ConfirmDialog } from "../src/components/ConfirmDialog";
+import { StorageSection } from "../src/components/StorageSection";
 import { FriendsView } from "../src/components/FriendsView";
 import { GroupPanel } from "../src/components/GroupPanel";
 import { LoginScreen } from "../src/components/LoginScreen";
@@ -660,6 +661,13 @@ check("renders the confirmation dialog and gates it on the typed text", () => {
   );
   assertContains(typed, "群名", "input label");
   assertContains(typed, 'disabled=""', "confirm starts disabled");
+});
+check("renders the storage panel's loading state", () => {
+  // The report is fetched in an effect, so a static render shows the placeholder:
+  // enough to prove the section exists and is wired into Settings.
+  const html = renderToStaticMarkup(<StorageSection notify={() => {}} />);
+  assertContains(html, "存储空间", "section heading");
+  assertContains(html, "正在统计", "loading line");
 });
 console.log("\n=== formatting helpers ===");
 check("DM titles join participants", () => {
