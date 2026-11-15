@@ -1,0 +1,4 @@
+# dsh-fatfish-bridge bundle patch：把桥接插件插入当前 profile 的插件层。
+- insert:
+    - id: dsh-fatfish-bridge
+      name: dsh-fatfish-bridge

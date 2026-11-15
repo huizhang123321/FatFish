@@ -1,0 +1,51 @@
+{
+  "name": "dsh-fatfish-bridge",
+  "version": "0.1.0",
+  "description": "DSH × FatFish 桥接插件：用本地聊天软件 FatFish 的频道/私聊远程驱动 DeepSeek Harness 会话",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "INSTALL.md",
+    "NOTICE",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node test/unit.test.js && node test/outbound-interactions.test.js && node test/dsh-control.test.js",
+    "test:live": "node test/live-client.test.js && node test/live-inbound.test.js && node test/live-plugin.test.js"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "dsh": ">=0.2.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5 || ^4.1.0",
+    "@deepseek-ai/dsh-agent": "^0.2.1-rc.5 || ^0.2.2-0",
+    "@deepseek-ai/dsh-compaction": "^0.2.1-rc.5 || ^0.2.2-0",
+    "@deepseek-ai/dsh-llm": "^0.2.1-rc.5 || ^0.2.2-0",
+    "@deepseek-ai/dsh-session": "^0.2.1-rc.5 || ^0.2.2-0",
+    "@deepseek-ai/schemastery": "^3.18.5 || ^3.19.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "fatfish",
+    "chat-bridge"
+  ],
+  "author": "FatFish contributors",
+  "license": "MIT"
+}

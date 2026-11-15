@@ -1,0 +1,10 @@
+dsh-fatfish-bridge
+Copyright (c) 2026 FatFish contributors
+
+This plugin's architecture (Cordis plugin shape, channel/session control model,
+step-level outbound routing, and approval/question waterfall interception) is
+adapted from dsh-qqbot-bridge by Jiangsubei, licensed under the MIT License:
+https://github.com/Jiangsubei/dsh-qqbot-bridge
+
+The FatFish transport layer, state store, command layer, and tests in this
+repository are original work for the FatFish chat application.
