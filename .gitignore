@@ -130,3 +130,11 @@ tsnet-sidecar/tsnet-sidecar
 .icon-preview/
 .backup-FatFish.exe
 
+
+# The app icon lives in desktop/build/, which the generic build/ rule ignores.
+# It is a source asset, not a build artifact, so re-include it.
+!desktop/build/
+!desktop/build/*.ico
+!desktop/build/*.png
+!desktop/build/*.py
+
