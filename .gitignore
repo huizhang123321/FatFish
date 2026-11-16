@@ -70,12 +70,16 @@ desktop/node_modules/
 /minimost/src/minimost/desktop_ui/.write-probe
 
 # ── Android client ─────────────────────────────────────────────────────────
-# Toolchain and scratch downloads stay local. The small sideload APK is kept
+# Toolchain and scratch downloads stay local. The signed sideload APK is kept
 # as a release artifact; screenshots and app sources are tracked too.
 .android-toolchain/
 .android-repository.xml
+.tools/
+.tsnet-check*/
+.tsnet-final/
 安卓端/.build/
 安卓端/build/
+安卓端/libs/
 安卓端/dist/
 !安卓端/dist/
 !安卓端/dist/*.apk
@@ -120,4 +124,9 @@ tsnet-sidecar/tsnet-sidecar
 
 # Manual test state of the tsnet sidecar: contains the node's private key.
 .tsnet-check/
+
+
+# Icon concept previews and the pre-patch exe kept for rollback.
+.icon-preview/
+.backup-FatFish.exe
 
