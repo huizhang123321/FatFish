@@ -41,6 +41,17 @@ SetCompressor bzip2
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
+; Icon: the same drawing the app ships with (desktop/build/icon.ico, generated from
+; the Android master). Both the wizard's header icon and the installer's own file
+; icon come from it, so Explorer, the wizard and the app all match.
+!ifndef ICON_FILE
+  !define ICON_FILE "..\desktop\build\icon.ico"
+!endif
+!define MUI_ICON "${ICON_FILE}"
+!define MUI_UNICON "${ICON_FILE}"
+Icon "${ICON_FILE}"
+UninstallIcon "${ICON_FILE}"
+
 !ifndef APP_DIR
   !error "APP_DIR must be defined (path to the electron-builder win-unpacked directory)"
 !endif
@@ -83,8 +94,8 @@ VIAddVersionKey "FileVersion" "${APP_VERSION}"
 VIAddVersionKey "LegalCopyright" "${APP_PUBLISHER}"
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+; (icon set above from desktop/build/icon.ico)
+
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
 !define MUI_FINISHPAGE_RUN_TEXT "立即启动 ${APP_NAME}"
 
