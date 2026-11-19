@@ -1,0 +1,52 @@
+name: SonarCloud
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sonar:
+    name: SonarCloud analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is required for accurate blame information and
+          # new-code detection on pull requests.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install package
+        run: pip install -e ".[dev]"
+
+      - name: Run Python tests and generate coverage report
+        run: pytest --cov=src/minimost --cov-report=xml --no-header -q
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Run JS tests and generate coverage report
+        run: npx jest --coverage
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        # Wait for the quality gate and fail the job on a red one. Without this
+        # the scan only uploads, the job goes green, and a failing gate is
+        # visible solely as the separate SonarCloud check — easy to miss.
+        with:
+          args: -Dsonar.qualitygate.wait=true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io

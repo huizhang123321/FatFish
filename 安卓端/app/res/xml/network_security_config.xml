@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FatFish is a LAN application. Plain HTTP is allowed because the desktop
+    launcher uses loopback HTTP and some users run the server without TLS.
+    The app still refuses to trust a self-signed certificate silently: the
+    WebView asks the user, and only then remembers that host.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

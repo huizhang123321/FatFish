@@ -1,0 +1,399 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Kept in step with the same tokens in styles.css — login and the app are one
+   product and should not greet you in two different typefaces. color-scheme
+   makes natively-painted UI (autofill backgrounds, the password reveal glyph,
+   scrollbars) follow the dark card instead of assuming a white page. */
+:root {
+  --font-ui:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono: "Cascadia Code", "Fira Code", Consolas, "Courier New", monospace;
+  color-scheme: dark;
+}
+
+/* Form controls do not inherit the page font on their own. */
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: #1e1e1e;
+  color: #ddd;
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.auth-brand {
+  font-size: 1.6em;
+  font-weight: 700;
+  color: #ddd;
+  margin-bottom: 16px;
+  letter-spacing: 0.5px;
+}
+
+.auth-card {
+  background: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 28px 32px;
+  width: 320px;
+}
+
+.auth-card h2 {
+  margin: 0 0 20px 0;
+  font-size: 1.1em;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+input {
+  width: 100%;
+  padding: 8px 10px;
+  background: #1e1e1e;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+input:focus {
+  outline: none;
+  border-color: #007acc;
+}
+
+button[type="submit"] {
+  width: 100%;
+  padding: 8px;
+  margin-top: 16px;
+  background: #007acc;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+button[type="submit"]:hover:not(:disabled) {
+  background: #005f9e;
+}
+
+button[type="submit"]:disabled {
+  background: #3a3a3a;
+  color: #aaa;
+  cursor: not-allowed;
+}
+
+.auth-error {
+  background: rgba(200, 50, 50, 0.15);
+  border: 1px solid #c83232;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #f88; /* NOSONAR — dark-theme app; effective contrast on dark bg exceeds 4.9:1 */
+  margin-bottom: 16px;
+}
+
+/* Positive confirmation banner (e.g. the explicit "you have been logged out"
+   message shown on the login page after logout). Mirrors .auth-error but in a
+   reassuring green rather than an alarming red. */
+.auth-notice {
+  display: block;
+  background: rgba(60, 160, 90, 0.15);
+  border: 1px solid #3ca05a;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #8fd9a8; /* NOSONAR — dark-theme app; contrast on dark bg exceeds 4.5:1 */
+  margin-bottom: 16px;
+}
+
+/* Caps Lock warning shown beneath a focused password field.  The base rule sets
+   no `display`, so the UA `[hidden] { display: none }` still hides it; the
+   `:not([hidden])` rule restores the flex layout only when shown. */
+.caps-warning {
+  font-size: 12px;
+  color: #f0c674; /* NOSONAR — amber warning; contrast on dark bg exceeds 4.5:1 */
+  margin-top: -2px;
+}
+.caps-warning:not([hidden]) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.caps-warning::before {
+  content: "\26A0"; /* ⚠ warning sign */
+}
+
+/* Wrapper added by auth-password-field.js so the Show/Hide button can sit
+   inside the password field. */
+.pw-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.pw-wrap > input {
+  flex: 1;
+  padding-right: 56px; /* leave room for the reveal button */
+}
+.pw-reveal {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #9cdcfe; /* NOSONAR — link-blue accent; contrast on dark bg exceeds 4.5:1 */
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.pw-reveal:hover {
+  color: #6cf;
+  background: #333;
+}
+
+/* Hairline separating the primary action (Log in) from the secondary footer
+   links below it. */
+.auth-divider {
+  height: 1px;
+  background: #3a3a3a;
+  margin: 22px 0 4px 0;
+}
+
+.auth-footer {
+  margin-top: 16px;
+  font-size: 13px;
+  color: #888;
+  text-align: center;
+}
+
+.auth-footer a {
+  color: #9cdcfe;
+  text-decoration: none;
+}
+
+.auth-footer a:hover {
+  text-decoration: underline;
+}
+
+/* Secondary login links ("Forgot your password?", "What is MiniMost?"), laid
+   out as a centred column rather than a wrapping row. They don't fit on one
+   line at the card's width, so the old row layout always wrapped — stranding
+   the "·" divider alone at the end of the first line. Stacking them removes the
+   need for a divider at all. */
+.auth-links {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 13px;
+}
+
+/* Each link wraps as a unit rather than breaking mid-phrase ("What is" /
+   "MiniMost?"), so a narrow card stacks them cleanly. */
+.auth-links a {
+  color: #9cdcfe;
+  text-decoration: none;
+  white-space: nowrap;
+  display: inline-block;
+}
+
+.auth-links a:hover {
+  text-decoration: underline;
+}
+
+.auth-hint {
+  font-size: 12px;
+  color: #777;
+  margin: 10px 0 0 0;
+}
+
+#password-message {
+  font-size: 13px;
+  min-height: 1.2em;
+  margin: 8px 0 0 0;
+}
+
+/* Sits between the username and password fields, so unlike #password-message it
+   must not reserve a line while it has nothing to say. */
+#username-message {
+  font-size: 13px;
+  margin: 6px 0 0 0;
+}
+
+#username-message:empty {
+  display: none;
+}
+
+#password-message.match,
+#username-message.match {
+  color: #6cf;
+}
+
+#password-message.no-match,
+#username-message.no-match {
+  color: #f88;
+}
+
+.pw-reqs {
+  list-style: none;
+  margin: 0;
+  padding: 6px 8px;
+  background: #252525;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pw-reqs li {
+  color: #666;
+}
+
+.pw-reqs li.req-met {
+  color: #6cf;
+}
+
+.pw-reqs li.req-unmet {
+  color: #f88;
+}
+
+.pw-reqs .req-icon {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+}
+
+.version-tag {
+  position: fixed;
+  bottom: 14px;
+  right: 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #6a9955;
+}
+
+/* "What is MiniMost?" marketing page.  Reuses the dark auth theme but in a
+   wider, scrollable card.  The <body> centres its children, so the card needs
+   its own vertical margins instead of relying on flex centring. */
+.about-card {
+  background: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 8px;
+  padding: 32px 36px;
+  width: 560px;
+  max-width: calc(100% - 32px);
+  margin: 4px 0 64px 0;
+}
+
+.about-title {
+  margin: 0 0 16px 0;
+  font-size: 1.5em;
+  font-weight: 700;
+  color: #ddd;
+}
+
+.about-lead {
+  margin: 0 0 24px 0;
+  font-size: 15px;
+  line-height: 1.55;
+  color: #bbb;
+}
+
+.about-cta {
+  display: block;
+  text-align: center;
+  text-decoration: none;
+  padding: 11px;
+  margin: 8px 0;
+  background: #007acc;
+  color: #fff;
+  border-radius: 4px;
+  font-size: 15px;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+
+.about-cta:hover {
+  background: #005f9e;
+}
+
+.about-cta-hint {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  color: #888;
+  text-align: center;
+}
+
+.about-section {
+  margin: 28px 0 14px 0;
+  font-size: 1.1em;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.about-features {
+  list-style: none;
+  margin: 0 0 24px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.about-features li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.about-feature-icon {
+  flex: 0 0 auto;
+  font-size: 20px;
+  line-height: 1.4;
+  width: 24px;
+  text-align: center;
+}
+
+.about-features strong {
+  display: block;
+  color: #ddd;
+  font-size: 14px;
+  margin-bottom: 3px;
+}
+
+.about-features div {
+  font-size: 13px;
+  line-height: 1.5;
+  color: #aaa;
+}
+
+@media (max-width: 360px) {
+  .auth-card {
+    width: calc(100% - 32px);
+  }
+}

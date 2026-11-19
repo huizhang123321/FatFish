@@ -1,0 +1,28 @@
+# setuptools>=39.2 is RHEL/EPEL 8's version — the floor for building this package
+# across every supported distro. Package metadata lives in setup.cfg (not a
+# [project] table here) precisely so this old a setuptools can build it; see the
+# header comment in setup.cfg.
+[build-system]
+requires = ["setuptools>=39.2", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# Release/version tooling config lives in .bumpversion.toml (see that file).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the src/ layout on sys.path so `import minimost` works without installing
+# the package (pytest >= 7 honours this ini option).
+pythonpath = ["src"]
+addopts = "--cov=src/minimost --cov-report=xml --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/minimost"]
+
+[tool.bandit]
+exclude_dirs = ["build", "dist"]
+
+[tool.ruff.lint]
+# Stick to ruff's default rule set: pyflakes (F) plus the pycodestyle error
+# checks E4/E7/E9. Line length and other formatting concerns are owned by black,
+# so style rules such as E501 are intentionally left off to avoid conflicts.
+select = ["E4", "E7", "E9", "F"]

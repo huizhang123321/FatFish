@@ -1,0 +1,15 @@
+<svg width="60" height="60" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- FatFish mark: the fish, traced as primitives so it stays crisp at 16 px.
+       Same drawing as desktop/build/icon.ico, which is generated from the
+       Android master (安卓端/app/res/drawable-nodpi/brand_icon.png). -->
+  <g>
+    <!-- tail -->
+    <path d="M331 256 L420 186 L420 326 Z" fill="#3ba8e0"/>
+    <!-- body -->
+    <ellipse cx="248" cy="256" rx="132" ry="96" fill="#4cc2ff"/>
+    <!-- fin -->
+    <path d="M236 262 L252 322 L268 262 Z" fill="#3ba8e0"/>
+    <!-- eye -->
+    <circle cx="190" cy="234" r="21" fill="#0b1220"/>
+  </g>
+</svg>

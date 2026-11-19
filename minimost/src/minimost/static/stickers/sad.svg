@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="难过">
+  <path d="M18 60c14-18 33-26 50-26 9 0 17 3 23 8l11-9-2 15 2 15-11-9c-6 5-14 8-23 8-17 0-36-8-50-26z" fill="#8fb8d8"/>
+  <circle cx="45" cy="52" r="4" fill="#0b0e14"/>
+  <circle cx="65" cy="52" r="4" fill="#0b0e14"/>
+  <path d="M50 74q10-8 20 0" stroke="#0b0e14" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M70 58q2 6 0 9" stroke="#4cc2ff" stroke-width="4" fill="none" stroke-linecap="round"/>
+</svg>

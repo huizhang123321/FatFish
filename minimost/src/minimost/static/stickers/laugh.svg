@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="大笑">
+  <path d="M18 60c14-18 33-26 50-26 9 0 17 3 23 8l11-9-2 15 2 15-11-9c-6 5-14 8-23 8-17 0-36-8-50-26z" fill="#63d2ff"/>
+  <path d="M57 48q5-5 10 0" stroke="#0b0e14" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  <path d="M48 62q14 16 28 0z" fill="#0b0e14"/>
+  <path d="M54 76q6-4 12 0" stroke="#ff8fa3" stroke-width="3" fill="none" stroke-linecap="round"/>
+</svg>

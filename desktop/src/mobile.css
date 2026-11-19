@@ -1,0 +1,556 @@
+/* ===========================================================================
+   FatFish phone layout
+   ---------------------------------------------------------------------------
+   Loaded after styles.css. The desktop interface is intentionally unchanged on
+   wide screens; everything here is scoped to .is-mobile (set by App.tsx from
+   matchMedia) or to the narrow-screen breakpoint for screens that render before
+   the shell exists (login, boot).
+
+   The Android shell is a WebView around this same bundle, so touch targets,
+   the on-screen keyboard, safe areas and the hardware back button are handled
+   here rather than in a second, divergent mobile client.
+   =========================================================================== */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.app-shell.is-mobile {
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
+  background: var(--bg-root);
+}
+
+/* The sidebar and the workspace are two screens on a phone, never columns. */
+.app-shell.is-mobile.mobile-list > .sidebar {
+  display: flex;
+}
+.app-shell.is-mobile.mobile-list > .workspace {
+  display: none;
+}
+.app-shell.is-mobile.mobile-content > .sidebar {
+  display: none;
+}
+.app-shell.is-mobile.mobile-content > .workspace {
+  display: flex;
+}
+
+.app-shell.is-mobile .sidebar {
+  width: 100%;
+  flex: 1 1 auto;
+  border-right: 0;
+}
+
+.mobile-appbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-raise);
+  background: color-mix(in srgb, var(--bg-raise) 92%, transparent);
+}
+.mobile-appbar .fish-mark {
+  filter: drop-shadow(0 4px 12px rgba(76, 194, 255, 0.28));
+}
+.mobile-theme-btn {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-dim);
+}
+.mobile-theme-btn:active {
+  background: var(--bg-hover);
+  color: var(--accent);
+}
+.mobile-appbar-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.mobile-appbar-text strong {
+  font-size: 18px;
+  letter-spacing: 0.01em;
+}
+.mobile-appbar-text span {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-shell.is-mobile .channel-sections {
+  padding: 2px 10px calc(84px + env(safe-area-inset-bottom, 0px));
+}
+.app-shell.is-mobile .channel-section + .channel-section {
+  margin-top: 16px;
+}
+.app-shell.is-mobile .channel-section h3 {
+  margin: 10px 10px 5px;
+  font-size: 11.5px;
+  letter-spacing: 0.1em;
+}
+.app-shell.is-mobile .channel-item {
+  min-height: 48px;
+  padding: 10px 11px;
+  gap: 10px;
+  font-size: 15px;
+  border-radius: 12px;
+}
+.app-shell.is-mobile .channel-item.active {
+  box-shadow: none;
+  background: var(--accent-soft);
+}
+.app-shell.is-mobile .channel-glyph {
+  flex-basis: 20px;
+  font-size: 16px;
+}
+.app-shell.is-mobile .unread-badge {
+  min-width: 20px;
+  height: 20px;
+  font-size: 11.5px;
+}
+.app-shell.is-mobile .section-empty {
+  margin-left: 12px;
+  font-size: 13px;
+}
+
+/* ── Bottom tabs ─────────────────────────────────────────────────────────── */
+.mobile-tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 25;
+  display: flex;
+  height: calc(58px + env(safe-area-inset-bottom, 0px));
+  padding: 4px 8px env(safe-area-inset-bottom, 0px);
+  background: var(--bg-raise);
+  background: color-mix(in srgb, var(--bg-raise) 94%, transparent);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(16px);
+}
+.mobile-tabbar button {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+.mobile-tabbar button.active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.mobile-tabbar svg {
+  display: block;
+}
+.tab-badge {
+  position: absolute;
+  top: 1px;
+  left: calc(50% + 5px);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #06121b;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* ── Chat pane ───────────────────────────────────────────────────────────── */
+.app-shell.is-mobile .workspace {
+  width: 100%;
+  min-height: 0;
+}
+.app-shell.is-mobile .chat-pane {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.chat-header.is-mobile {
+  min-height: 56px;
+  padding: 7px 8px;
+  gap: 6px;
+  background: var(--bg-raise);
+  background: color-mix(in srgb, var(--bg-raise) 94%, transparent);
+  backdrop-filter: blur(16px);
+}
+.chat-header.is-mobile .chat-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.chat-header.is-mobile .chat-title h2 {
+  min-width: 0;
+  font-size: 15.5px;
+  gap: 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat-header.is-mobile .chat-title h2 .channel-glyph {
+  flex: 0 0 auto;
+}
+.chat-header.is-mobile .chat-header-actions {
+  flex: 0 0 auto;
+  gap: 5px;
+}
+.chat-header.is-mobile .stream-badge {
+  padding: 2px 6px;
+  font-size: 10px;
+}
+.chat-header.is-mobile .ghost-btn {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+.mobile-back {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+}
+.mobile-back:active {
+  background: var(--bg-hover);
+}
+
+.app-shell.is-mobile .message-scroll {
+  padding: 10px 6px 4px;
+}
+.app-shell.is-mobile .message {
+  padding: 3px 7px;
+  gap: 8px;
+}
+.app-shell.is-mobile .message-gutter {
+  flex-basis: 32px;
+}
+.app-shell.is-mobile .message-body {
+  max-width: 84%;
+  padding: 6px 10px;
+  font-size: 14.5px;
+  line-height: 1.52;
+}
+.app-shell.is-mobile .message-text {
+  overflow-wrap: anywhere;
+}
+.app-shell.is-mobile .attachment-image {
+  max-width: 100%;
+}
+.app-shell.is-mobile .attachment-image img {
+  max-height: 320px;
+}
+.app-shell.is-mobile .system-message {
+  max-width: 88%;
+  font-size: 12px;
+}
+.app-shell.is-mobile .typing-line {
+  height: 18px;
+  padding: 0 14px;
+}
+.app-shell.is-mobile .composer {
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: var(--bg-raise);
+}
+.app-shell.is-mobile .composer-row {
+  gap: 3px;
+}
+.app-shell.is-mobile .composer-row textarea {
+  min-height: 40px;
+  max-height: 112px;
+  padding: 8px 9px;
+  font-size: 16px; /* below 16px iOS/Android zooms the whole page on focus */
+}
+.app-shell.is-mobile .icon-btn {
+  width: 36px;
+  height: 40px;
+  font-size: 19px;
+}
+.app-shell.is-mobile .send-btn {
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+}
+.app-shell.is-mobile .composer-meta {
+  display: none;
+}
+.app-shell.is-mobile .composer-attachments {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 6px;
+}
+.app-shell.is-mobile .attachment-chip {
+  flex: 0 0 auto;
+}
+
+/* Emoji and sticker panels become a bottom sheet, not a floating card. */
+.app-shell.is-mobile .emoji-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+  z-index: 24;
+  margin: 0;
+  border-radius: 18px 18px 0 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  padding: 12px 12px 18px;
+  box-shadow: 0 -18px 50px rgba(0, 0, 0, 0.4);
+}
+.app-shell.is-mobile .emoji-grid {
+  max-height: 40vh;
+  grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+}
+.app-shell.is-mobile .sticker-grid {
+  max-height: 42vh;
+  grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+}
+
+/* The member/settings dock is a full-screen sheet on a phone. */
+.app-shell.is-mobile .dock {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  width: auto;
+  flex-basis: auto;
+  padding-top: env(safe-area-inset-top, 0px);
+  border-left: 0;
+  background: var(--bg-raise);
+}
+.app-shell.is-mobile .dock-header {
+  min-height: 54px;
+  padding: 8px 12px;
+}
+.app-shell.is-mobile .dock-header .icon-btn {
+  width: 40px;
+  height: 40px;
+  font-size: 22px;
+}
+.app-shell.is-mobile .dock-body {
+  padding: 4px 16px calc(28px + env(safe-area-inset-bottom, 0px));
+}
+.app-shell.is-mobile .member-actions {
+  opacity: 1;
+}
+.app-shell.is-mobile .member-actions .mini-btn,
+.app-shell.is-mobile .member-actions .ghost-btn {
+  padding: 6px 9px;
+}
+.app-shell.is-mobile .group-no {
+  font-size: 20px;
+}
+
+/* ── Friends / settings panels ───────────────────────────────────────────── */
+.app-shell.is-mobile .panel {
+  width: 100%;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.app-shell.is-mobile .panel-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  align-items: center;
+  gap: 4px;
+  min-height: 56px;
+  padding: 7px 8px;
+  background: var(--bg-raise);
+  background: color-mix(in srgb, var(--bg-raise) 94%, transparent);
+  backdrop-filter: blur(16px);
+}
+.app-shell.is-mobile .panel-header h2 {
+  margin-right: auto;
+  font-size: 17px;
+  padding-left: 2px;
+}
+.app-shell.is-mobile .panel-hint {
+  padding-right: 8px;
+}
+.app-shell.is-mobile .panel-body {
+  width: 100%;
+  max-width: none;
+  padding: 6px 16px 28px;
+}
+.app-shell.is-mobile .panel-block {
+  padding: 16px 0;
+}
+.app-shell.is-mobile .panel-block h3 {
+  margin-bottom: 10px;
+}
+.app-shell.is-mobile .search-form input,
+.app-shell.is-mobile .settings-inline input:not([type="color"]) {
+  min-width: 0;
+  width: 100%;
+}
+.app-shell.is-mobile .settings-inline {
+  gap: 8px;
+}
+.app-shell.is-mobile .settings-inline > * {
+  min-width: 0;
+}
+.app-shell.is-mobile .search-form,
+.app-shell.is-mobile .settings-inline {
+  align-items: stretch;
+}
+.app-shell.is-mobile .search-form {
+  flex-wrap: nowrap;
+}
+.app-shell.is-mobile .search-form .primary-btn {
+  flex: 0 0 auto;
+}
+.app-shell.is-mobile .person-list li {
+  min-height: 50px;
+}
+.app-shell.is-mobile .theme-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.app-shell.is-mobile .theme-toggle button {
+  justify-content: center;
+}
+.app-shell.is-mobile .login-footnote {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ── Dialogs as bottom sheets ────────────────────────────────────────────── */
+.app-shell.is-mobile .modal-backdrop {
+  align-items: flex-end;
+  padding: 0;
+}
+.app-shell.is-mobile .modal {
+  width: 100%;
+  max-height: 88dvh;
+  border-radius: 20px 20px 0 0;
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.app-shell.is-mobile .modal-header {
+  padding: 14px 16px;
+}
+.app-shell.is-mobile .modal-body {
+  padding: 16px;
+}
+.app-shell.is-mobile .modal-footer {
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.app-shell.is-mobile .modal-footer .primary-btn,
+.app-shell.is-mobile .modal-footer .ghost-btn {
+  min-height: 42px;
+}
+
+.app-shell.is-mobile .toast {
+  bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  left: 16px;
+  right: 16px;
+  transform: none;
+  text-align: center;
+}
+.app-shell.is-mobile .build-tag {
+  display: none;
+}
+
+/* ── Login / boot ────────────────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  .login-page {
+    height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: calc(20px + env(safe-area-inset-top, 0px)) 18px
+      calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  .login-card {
+    width: 100%;
+    max-width: 460px;
+    padding: 24px 20px;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    background: var(--bg-raise);
+    background: color-mix(in srgb, var(--bg-raise) 88%, transparent);
+    box-shadow: var(--shadow);
+  }
+  .login-card input {
+    font-size: 16px;
+  }
+  .login-server {
+    margin: -6px 0 0;
+    font-size: 11.5px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .login-server code {
+    color: var(--text-dim);
+  }
+  .boot-screen {
+    height: 100dvh;
+  }
+  .toast {
+    max-width: none;
+  }
+}
+
+/* A slightly longer colour wash on a phone makes the day/night switch read
+   as one movement instead of a flash; the base rule already enables the
+   transition, this only lengthens it. */
+@media (max-width: 760px) {
+  .theme-fading,
+  .theme-fading *,
+  .theme-fading *::before,
+  .theme-fading *::after {
+    transition-duration: 420ms !important;
+  }
+}
+
+@media (max-width: 390px) {
+  .app-shell.is-mobile .composer-row {
+    gap: 1px;
+  }
+  .app-shell.is-mobile .icon-btn {
+    width: 33px;
+  }
+  .app-shell.is-mobile .send-btn {
+    padding: 0 10px;
+  }
+  .app-shell.is-mobile .message-body {
+    max-width: 87%;
+  }
+}

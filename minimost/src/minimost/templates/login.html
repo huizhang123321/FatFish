@@ -1,0 +1,52 @@
+<!doctype html>
+{% from "_assets.html" import stylesheet %}
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Login – MiniMost</title>
+    {{ stylesheet('auth.css') }}
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="manifest" href="{{ url_for('static', filename='site.webmanifest') }}">
+</head>
+<body>
+    <div class="auth-brand">Mini<span style="color:#007acc">Most</span></div>
+    <div class="auth-card">
+        <h2>Log in</h2>
+
+        {% if error %}
+        <div class="auth-error">{{ error }}</div>
+        {% elif logged_out %}
+        <output class="auth-notice">
+            You have been logged out. Your session was securely terminated.
+        </output>
+        {% endif %}
+
+        <form method="post" autocomplete="on">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="auth-field">
+                <input id="username" type="text" name="username" placeholder="Username" aria-label="Username" required autocomplete="username" {% if not error %}autofocus{% endif %} value="{{ username or '' }}">
+                <input id="password" name="password" type="password" placeholder="Password" aria-label="Password" required autocomplete="current-password" maxlength="1024" {% if error %}autofocus{% endif %}>
+            </div>
+            <button type="submit">Log in</button>
+        </form>
+
+        <div class="auth-divider"></div>
+
+        <p class="auth-footer">
+            Don't have an account? <a href="/signup">Sign up</a>
+        </p>
+        <div class="auth-links">
+            <a href="/forgot-password">Forgot your password?</a>
+            <a href="/about">What is MiniMost?</a>
+        </div>
+    </div>
+    <div class="version-tag"># v{{ app_version }}</div>
+    <script src="{{ url_for('static', filename='auth-password-field.js') }}"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js');
+      }
+    </script>
+</body>
+</html>

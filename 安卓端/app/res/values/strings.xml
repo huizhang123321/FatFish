@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FatFish</string>
+    <string name="setup_title">FatFish</string>
+    <string name="setup_kicker">安卓客户端</string>
+    <string name="setup_intro">连接到运行 FatFish 的电脑。局域网直连，或让手机先通过官方 Tailscale App 接入 tailnet 后再填地址。消息、账号与文件都留在电脑上。</string>
+    <string name="server_label">服务器地址</string>
+    <string name="server_hint">例如 192.168.1.20:5000</string>
+    <string name="connect">连接</string>
+    <string name="help">连接说明</string>
+    <string name="setup_footnote">FatFish 安卓端只做连接，不内置 Tailscale、不申请系统 VPN。跨网络访问请先在手机上安装并登录官方 Tailscale App。</string>
+    <string name="last_server">上次连接</string>
+    <string name="offline_title">连不上服务器</string>
+    <string name="retry">重试</string>
+    <string name="switch_server">切换服务器</string>
+</resources>
